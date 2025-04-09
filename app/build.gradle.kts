@@ -19,6 +19,15 @@ android {
         ndk {
             abiFilters.add("arm64-v8a")
         }
+
+        externalNativeBuild {
+            cmake {
+                arguments("-DANDROID_STL=c++_shared", 
+                          "-DANDROID_ARM_NEON=ON")
+                cppFlags("-fopenmp")
+                abiFilters("arm64-v8a")
+            }
+        }
     }
 
     externalNativeBuild {
@@ -26,7 +35,6 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
-
 
     buildTypes {
         release {
@@ -46,6 +54,12 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
