@@ -11,15 +11,12 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv* env, jobject
     // Log to verify that the native method is called
     __android_log_print(ANDROID_LOG_INFO, "NCNN", "Native init called");
     
-    // Disable OpenMP multi-threading to avoid the errors and overhead
-    // This bypasses the OpenMP-related function calls in NCNN
-    ncnn::set_omp_num_threads(1);
+    // Configure NCNN options - Force CPU-only mode
+    net.opt.num_threads = 4;  // Use multiple threads for CPU computation
+    net.opt.lightmode = true; // Enable light mode for faster inference
     
-    // Set CPU usage and affinity to minimize the need for OpenMP
-    ncnn::set_cpu_powersave(2); // Use little cores only
-    
-    // Optionally disable GPU/Vulkan (if having GPU-related linking issues)
-    // net.opt.use_vulkan_compute = false;
+    // Always ensure Vulkan is disabled regardless of how NCNN was compiled
+    net.opt.use_vulkan_compute = false;
     
     // Return success
     return JNI_TRUE;

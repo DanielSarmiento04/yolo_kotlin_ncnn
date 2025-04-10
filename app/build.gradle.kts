@@ -24,7 +24,7 @@ android {
             cmake {
                 arguments("-DANDROID_STL=c++_shared", 
                           "-DANDROID_ARM_NEON=ON")
-                cppFlags("-fopenmp")
+                cppFlags("-fopenmp", "-DNCNN_VULKAN=0")
                 abiFilters("arm64-v8a")
             }
         }

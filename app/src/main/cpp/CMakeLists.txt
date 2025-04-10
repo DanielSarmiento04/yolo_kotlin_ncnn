@@ -3,6 +3,9 @@ project("MyARApp")
 
 set(CMAKE_CXX_STANDARD 11)
 
+# Disable Vulkan completely for NCNN
+add_definitions(-DNCNN_VULKAN=OFF)
+
 # Find and enable OpenMP
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
@@ -13,12 +16,12 @@ endif()
 
 # Add OpenMP library directory
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include)
-include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/glslang)
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/ncnn)
 
 # This creates the shared library "native-lib" from native-lib.cpp.
 add_library(native-lib SHARED
     native-lib.cpp
+    glslang_stub.cpp  # Add our glslang stub implementation
 )
 
 # Define OpenMP library path - Android NDK r21+ includes libomp
@@ -29,31 +32,19 @@ if(NOT EXISTS ${OPENMP_LIB})
     set(OPENMP_LIB OpenMP::OpenMP_CXX)
 endif()
 
-# Ensure the correct order of glslang libraries (this order matters)
-add_library(glslang_static STATIC IMPORTED)
-set_target_properties(glslang_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libglslang.a)
-
-add_library(spirv_static STATIC IMPORTED)
-set_target_properties(spirv_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libSPIRV.a)
-
-add_library(oglcompiler_static STATIC IMPORTED)
-set_target_properties(oglcompiler_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libOGLCompiler.a)
-
+# Only include NCNN library and remove dependency on glslang libraries
 add_library(ncnn_static STATIC IMPORTED)
 set_target_properties(ncnn_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libncnn.a)
 
-# Link against all libraries with correct dependency order
+# Link with simplified dependencies - remove Vulkan and glslang dependencies
 target_link_libraries(native-lib
     ncnn_static
-    glslang_static
-    spirv_static
-    oglcompiler_static
     ${OPENMP_LIB}
-    vulkan
     jnigraphics
     android
     log
 )
 
-# Disable undefined symbol errors if OpenMP still causes issues
+# Disable undefined symbol errors
 set_target_properties(native-lib PROPERTIES LINK_FLAGS "-Wl,--allow-shlib-undefined")
+
