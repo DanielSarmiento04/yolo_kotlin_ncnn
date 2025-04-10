@@ -3,8 +3,8 @@ project("MyARApp")
 
 set(CMAKE_CXX_STANDARD 11)
 
-# Disable Vulkan completely for NCNN
-add_definitions(-DNCNN_VULKAN=OFF)
+# Disable Vulkan completely for NCNN at compile time
+add_definitions(-DNCNN_VULKAN=0)
 
 # Find and enable OpenMP
 find_package(OpenMP)
@@ -14,14 +14,24 @@ if(OpenMP_CXX_FOUND)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
 
-# Add OpenMP library directory
+# Add include directories
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include)
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/ncnn)
 
-# This creates the shared library "native-lib" from native-lib.cpp.
+# Compile the glslang stub separately with all symbols exported
+add_library(glslang_stub STATIC
+    glslang_stub.cpp
+)
+
+# Set visibility for the stub library
+set_target_properties(glslang_stub PROPERTIES
+    CXX_VISIBILITY_PRESET default
+    VISIBILITY_INLINES_HIDDEN OFF
+)
+
+# This creates the shared library "native-lib" from native-lib.cpp
 add_library(native-lib SHARED
     native-lib.cpp
-    glslang_stub.cpp  # Add our glslang stub implementation
 )
 
 # Define OpenMP library path - Android NDK r21+ includes libomp
@@ -32,12 +42,13 @@ if(NOT EXISTS ${OPENMP_LIB})
     set(OPENMP_LIB OpenMP::OpenMP_CXX)
 endif()
 
-# Only include NCNN library and remove dependency on glslang libraries
+# Only include NCNN library
 add_library(ncnn_static STATIC IMPORTED)
 set_target_properties(ncnn_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libncnn.a)
 
-# Link with simplified dependencies - remove Vulkan and glslang dependencies
+# Link with ncnn and our glslang stub
 target_link_libraries(native-lib
+    glslang_stub  # Link our stub first so its symbols are used
     ncnn_static
     ${OPENMP_LIB}
     jnigraphics
@@ -45,6 +56,7 @@ target_link_libraries(native-lib
     log
 )
 
-# Disable undefined symbol errors
-set_target_properties(native-lib PROPERTIES LINK_FLAGS "-Wl,--allow-shlib-undefined")
+# Use additional link flags to handle symbol resolution issues
+set_target_properties(native-lib PROPERTIES 
+    LINK_FLAGS "-Wl,--allow-shlib-undefined -Wl,--allow-multiple-definition")
 
