@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.example.yolo_kotlin_ncnn.ui.theme.Yolo_kotlin_ncnnTheme
 
 class MainActivity : ComponentActivity() {
@@ -35,6 +36,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             Yolo_kotlin_ncnnTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                    // Use the improved Vulkan status checker UI
                     NcnnStatusScreen(
                         modifier = Modifier.padding(innerPadding),
                         detector = detector
@@ -64,7 +66,23 @@ fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
         }
     }
     
-    Column(modifier = modifier) {
+    Column(modifier = modifier.padding(16.dp)) {
+        // Use our improved status checker UI component
+        VulkanStatusChecker(
+            isInitialized = isInitialized,
+            isModelLoaded = isModelLoaded,
+            hasVulkan = hasVulkan
+        )
+    }
+}
+
+@Composable
+fun VulkanStatusChecker(
+    isInitialized: Boolean,
+    isModelLoaded: Boolean,
+    hasVulkan: Boolean
+) {
+    Column {
         Text(
             text = "NCNN Status",
             style = MaterialTheme.typography.headlineMedium
@@ -77,14 +95,12 @@ fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
 
 @Preview(showBackground = true)
 @Composable
-fun GreetingPreview() {
+fun StatusPreview() {
     Yolo_kotlin_ncnnTheme {
-        // Can't preview with actual detector
-        Column {
-            Text("NCNN Status")
-            Text("Initialization: Success")
-            Text("Model loaded: Yes")
-            Text("Vulkan support: Available")
-        }
+        VulkanStatusChecker(
+            isInitialized = true,
+            isModelLoaded = true,
+            hasVulkan = true
+        )
     }
 }

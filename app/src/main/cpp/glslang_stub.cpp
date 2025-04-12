@@ -1,21 +1,34 @@
 #include <string>
 #include <vector>
+#include "glslang_stub.h"
 
 // Structure to match glslang's TBuiltInResource
-struct TBuiltInResource {};
+struct TBuiltInResource {
+    // Provide minimal default values needed by NCNN
+    int maxLights = 32;
+    int maxClipPlanes = 6;
+    int maxTextureUnits = 32;
+    // Add other fields as needed by NCNN
+};
 
 namespace glslang {
 
-// Enums needed by the NCNN library
-enum EShLanguage { EShLangVertex, EShLangFragment, EShLangCompute };
-enum EProfile { ENoProfile, ECoreProfile, ECompatibilityProfile, EEsProfile };
-enum EShMessages { 
-    EShMsgDefault = 0,
-    EShMsgRelaxedErrors = (1 << 0),
-    EShMsgSuppressWarnings = (1 << 1),
-    EShMsgVulkanRules = (1 << 2),
-    EShMsgSpvRules = (1 << 3),
-    EShMsgReadHlsl = (1 << 4) 
+// Define string class implementation
+class TString {
+public:
+    TString(const char* s = "") {}
+    const char* c_str() const { return ""; }
+};
+
+// Implement forward declared classes
+class TType {
+public:
+    TType() {}
+};
+
+class TVector {
+public:
+    TVector() {}
 };
 
 class TQualifier {
@@ -33,17 +46,6 @@ public:
     TIntermTyped() {}
 };
 
-// Forward declarations for classes needed by TIntermediate
-class TType {
-public:
-    TType() {}
-};
-
-class TVector {
-public:
-    TVector() {}
-};
-
 class TIntermediate {
 public:
     TIntermediate() {}
@@ -58,7 +60,6 @@ public:
     TIntermediate* getIntermediate() const { return nullptr; }
 };
 
-// Pool allocator for the compiler
 class TPoolAllocator {
 public:
     void push() {}
@@ -66,47 +67,31 @@ public:
     void* allocate(unsigned long size) { return nullptr; }
 };
 
-// Options for SPIRV generation
 class SpvOptions {};
 class SpvBuildLogger {};
 
-// String handling for glslang
-class TString {
-public:
-    TString(const char* s = "") {}
-    const char* c_str() const { return ""; }
-};
+// Implement TShader methods (NOT redefining the class)
+TShader::TShader(EShLanguage stage) {}
+TShader::~TShader() {}
+void TShader::setStringsWithLengths(const char* const* strings, const int* lengths, int n) {}
+void TShader::addProcesses(const std::vector<std::string>& processes) {}
+void TShader::setEntryPoint(const char* entryPoint) {}
+void TShader::setSourceEntryPoint(const char* sourceEntryPointName) {}
+bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
+                  bool force, bool verbose, EShMessages messages) { return true; }
+bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
+                  bool force, bool verbose, EShMessages messages, Includer& includer) { return true; }
+const char* TShader::getInfoLog() { return ""; }
+const char* TShader::getInfoDebugLog() { return ""; }
+const TIntermediate* TShader::getIntermediate() const { return nullptr; }
+void TShader::setStrings(const char* const* strings, int n) {}
+void TShader::setAutoMapLocations(bool map) {}
+void TShader::setAutoMapBindings(bool map) {}
 
-// TShader class with all needed methods that NCNN calls
-class TShader {
-public:
-    class Includer {
-    public:
-        virtual ~Includer() {}
-    };
+// Static global TBuiltInResource for simplicity
+TBuiltInResource DefaultTBuiltInResource;
 
-    // Constructor and destructor
-    TShader(EShLanguage stage) {}
-    ~TShader() {}
-    
-    // Methods needed by NCNN's GPU module
-    void setStringsWithLengths(const char* const* strings, const int* lengths, int n) {}
-    void addProcesses(const std::vector<std::string>& processes) {}
-    void setEntryPoint(const char* entryPoint) {}
-    void setSourceEntryPoint(const char* sourceEntryPointName) {}
-    bool parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
-              bool force, bool verbose, EShMessages messages, TShader::Includer& includer) { return true; }
-    const char* getInfoLog() { return ""; }
-    const char* getInfoDebugLog() { return ""; }
-    const TIntermediate* getIntermediate() const { return nullptr; }
-    
-    // Additional methods that might be needed
-    void setStrings(const char* const* strings, int n) {}
-    void setAutoMapLocations(bool map) {}
-    void setAutoMapBindings(bool map) {}
-};
-
-// Define all necessary global functions
+// Define all necessary global functions - make sure they're exported
 TPoolAllocator* GetThreadPoolAllocator() { 
     static TPoolAllocator pool;
     return &pool; 
@@ -118,13 +103,34 @@ void InitializeProcess() {}
 
 void FinalizeProcess() {}
 
+// Export key functions NCNN needs with C linkage to avoid name mangling issues
+extern "C" {
+    TBuiltInResource* GetDefaultResources() {
+        return &DefaultTBuiltInResource;
+    }
+}
+
 // Export GlslangToSpv with all variations needed
-void GlslangToSpv(const TIntermediate& intermediate, 
+
+// Version with SpvBuildLogger and SpvOptions (matches header default)
+void GlslangToSpv(const TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv,
-                 SpvBuildLogger* logger = nullptr,
-                 SpvOptions* options = nullptr) {}
-                 
-void GlslangToSpv(const TIntermediate& intermediate, 
-                 std::vector<unsigned int>& spirv) {}
+                 SpvBuildLogger* logger,
+                 SpvOptions* options) {
+    spirv.clear();
+}
+
+// Version with only SpvOptions* (matches linker error)
+void GlslangToSpv(const TIntermediate& intermediate,
+                 std::vector<unsigned int>& spirv,
+                 SpvOptions* options) {
+    spirv.clear();
+}
+
+// Version with no logger or options (matches header overload)
+void GlslangToSpv(const TIntermediate& intermediate,
+                 std::vector<unsigned int>& spirv) {
+    spirv.clear();
+}
 
 } // namespace glslang

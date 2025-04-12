@@ -127,9 +127,21 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv* env, jobject
         return JNI_FALSE;
     }
     
-    // Initialize Vulkan if supported
-    ncnn::create_gpu_instance();
-    hasGPU = ncnn::get_gpu_count() > 0;
+    // Initialize Vulkan with proper error handling
+    try {
+        // Initialize NCNN GPU instance
+        ncnn::create_gpu_instance();
+        
+        // Check if any GPU devices available
+        hasGPU = ncnn::get_gpu_count() > 0;
+        LOGI("Vulkan detection: %d GPU devices found", ncnn::get_gpu_count());
+    } catch (const std::exception& e) {
+        LOGE("Failed to initialize Vulkan: %s", e.what());
+        hasGPU = false;
+    } catch (...) {
+        LOGE("Unknown error when initializing Vulkan");
+        hasGPU = false;
+    }
     
     LOGI("Vulkan support: %s", hasGPU ? "available" : "unavailable");
     
@@ -140,10 +152,10 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv* env, jobject
     // Use Vulkan if available
     if (hasGPU) {
         yoloNet.opt.use_vulkan_compute = true;
-        LOGI("Vulkan enabled");
+        LOGI("Vulkan enabled for inference");
     } else {
         yoloNet.opt.use_vulkan_compute = false;
-        LOGI("Vulkan disabled, using CPU");
+        LOGI("Vulkan not available, using CPU for inference");
     }
     
     // Register custom layers

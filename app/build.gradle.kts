@@ -25,7 +25,8 @@ android {
                 arguments("-DANDROID_STL=c++_shared", 
                           "-DANDROID_ARM_NEON=ON",
                           "-DCMAKE_BUILD_TYPE=Release")
-                cppFlags("-fopenmp", "-std=c++11", "-fno-rtti", "-fno-exceptions")
+                // Restore flags likely used for libncnn.a compilation
+                cppFlags("-fno-rtti", "-fno-exceptions", "-fopenmp", "-std=c++11")
                 abiFilters("arm64-v8a")
             }
         }
