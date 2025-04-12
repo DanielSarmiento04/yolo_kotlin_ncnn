@@ -5,6 +5,11 @@ project("yolo_kotlin_ncnn")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Set global C++ flags BEFORE defining libraries
+# -fvisibility=hidden: Make symbols hidden by default
+# -fno-rtti -fno-exceptions: Match common NCNN build settings
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden -fno-rtti -fno-exceptions")
+
 # Enable Vulkan support
 add_definitions(-DNCNN_VULKAN=1)
 
@@ -21,6 +26,7 @@ include_directories(
 add_library(glslang_stub STATIC
     glslang_stub.cpp
 )
+# Symbols within glslang_stub.cpp marked with __attribute__((visibility("default"))) will be exported
 
 # Find the Vulkan library
 find_library(vulkan-lib vulkan)
@@ -44,9 +50,6 @@ message(STATUS "Importing NCNN library from: ${CMAKE_CURRENT_SOURCE_DIR}/libs/${
 add_library(native-lib SHARED
     native-lib.cpp
 )
-
-# Set C++ flags for native-lib: Disable RTTI to match libncnn.a
-set_target_properties(native-lib PROPERTIES COMPILE_FLAGS "-fno-rtti -fno-exceptions")
 
 # Link libraries to native-lib
 target_link_libraries(native-lib
