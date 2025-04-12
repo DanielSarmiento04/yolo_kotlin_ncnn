@@ -23,10 +23,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments("-DANDROID_STL=c++_shared", 
-                          "-DANDROID_ARM_NEON=ON",
-                          "-DCMAKE_BUILD_TYPE=Release")
-                // Restore flags likely used for libncnn.a compilation
-                cppFlags("-fno-rtti", "-fno-exceptions", "-fopenmp", "-std=c++11")
+                          "-DANDROID_ARM_NEON=ON")
                 abiFilters("arm64-v8a")
             }
         }

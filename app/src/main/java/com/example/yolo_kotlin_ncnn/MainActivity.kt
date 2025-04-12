@@ -1,16 +1,13 @@
 package com.example.yolo_kotlin_ncnn
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -67,7 +64,7 @@ fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
     }
     
     Column(modifier = modifier.padding(16.dp)) {
-        // Use our improved status checker UI component
+        // Use the VulkanStatusChecker imported from its own file
         VulkanStatusChecker(
             isInitialized = isInitialized,
             isModelLoaded = isModelLoaded,
@@ -76,27 +73,11 @@ fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
     }
 }
 
-@Composable
-fun VulkanStatusChecker(
-    isInitialized: Boolean,
-    isModelLoaded: Boolean,
-    hasVulkan: Boolean
-) {
-    Column {
-        Text(
-            text = "NCNN Status",
-            style = MaterialTheme.typography.headlineMedium
-        )
-        Text("Initialization: ${if (isInitialized) "Success" else "Failed"}")
-        Text("Model loaded: ${if (isModelLoaded) "Yes" else "No"}")
-        Text("Vulkan support: ${if (hasVulkan) "Available" else "Unavailable"}")
-    }
-}
-
 @Preview(showBackground = true)
 @Composable
 fun StatusPreview() {
     Yolo_kotlin_ncnnTheme {
+        // This now refers to the VulkanStatusChecker from VulkanStatusChecker.kt
         VulkanStatusChecker(
             isInitialized = true,
             isModelLoaded = true,

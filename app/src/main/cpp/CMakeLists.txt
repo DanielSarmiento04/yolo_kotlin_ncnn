@@ -10,17 +10,11 @@ add_definitions(-DNCNN_VULKAN=1)
 
 # Enable OpenMP
 find_package(OpenMP REQUIRED)
-if(OpenMP_CXX_FOUND)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-endif()
 
 # Set include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include
-    ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include/ncnn
-    ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include/glslang
 )
 
 # Build the glslang stub library as STATIC
@@ -28,13 +22,12 @@ add_library(glslang_stub STATIC
     glslang_stub.cpp
 )
 
-# Set properties for glslang_stub (Visibility settings less critical for STATIC)
-set_target_properties(glslang_stub PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-)
-
 # Find the Vulkan library
 find_library(vulkan-lib vulkan)
+if(NOT vulkan-lib)
+    message(FATAL_ERROR "Vulkan library not found. Check NDK setup and API level.")
+endif()
+message(STATUS "Found Vulkan library: ${vulkan-lib}")
 
 # Find required Android libraries
 find_library(log-lib log)
@@ -42,32 +35,41 @@ find_library(android-lib android)
 find_library(jnigraphics-lib jnigraphics)
 
 # Import NCNN library
-add_library(ncnn STATIC IMPORTED)
+add_library(ncnn STATIC IMPORTED GLOBAL)
 set_target_properties(ncnn PROPERTIES IMPORTED_LOCATION
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a)
+message(STATUS "Importing NCNN library from: ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a")
 
 # Build the main native library
 add_library(native-lib SHARED
     native-lib.cpp
 )
 
-# Link against our libraries
-# Link static libraries directly. Order might matter.
+# Set C++ flags for native-lib: Disable RTTI to match libncnn.a
+set_target_properties(native-lib PROPERTIES COMPILE_FLAGS "-fno-rtti -fno-exceptions")
+
+# Link libraries to native-lib
 target_link_libraries(native-lib
-    # System/Shared libs first
-    ${vulkan-lib}
+    PRIVATE
+    # System libraries
     ${log-lib}
     ${android-lib}
     ${jnigraphics-lib}
+    ${vulkan-lib}
+
+    # OpenMP
     OpenMP::OpenMP_CXX
 
-    # Static libraries - glslang_stub needs to satisfy ncnn's dependencies
+    # Force inclusion of all objects from glslang_stub static library
+    -Wl,--whole-archive
     glslang_stub
-    ncnn
-)
+    -Wl,--no-whole-archive
 
-# Add specific link flags to handle symbol resolution
-# Keep --no-undefined for strictness
-set_target_properties(native-lib PROPERTIES
-    LINK_FLAGS "-Wl,--allow-multiple-definition -Wl,-z,nodelete -Wl,--no-undefined")
+    # Link NCNN *after* glslang_stub
+    ncnn
+
+    # Other dependencies
+    atomic
+    m
+)
 

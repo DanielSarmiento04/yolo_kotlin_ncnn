@@ -1,5 +1,6 @@
 #include <string>
 #include <vector>
+#include <map> // Include the map header
 #include "glslang_stub.h"
 
 // Structure to match glslang's TBuiltInResource
@@ -12,6 +13,11 @@ struct TBuiltInResource {
 };
 
 namespace glslang {
+
+// Forward declarations for missing types
+class TIntermNode; // Forward declare TIntermNode
+class SpvVersion;  // Forward declare SpvVersion
+class TSymbol;     // Forward declare TSymbol
 
 // Define string class implementation
 class TString {
@@ -46,9 +52,21 @@ public:
     TIntermTyped() {}
 };
 
+// Minimal TIntermediate implementation
 class TIntermediate {
 public:
     TIntermediate() {}
+    const TType* getOutputType() const { return nullptr; }
+    // Use the forward-declared TIntermNode
+    bool postProcess(TIntermNode*, EShLanguage) { return true; }
+    void setEntryPointName(const char*) {}
+    void setEntryPointMangledName(const char*) {}
+    void setVersion(int) {}
+    // Use the forward-declared SpvVersion
+    void setSpv(const SpvVersion&) {}
+    void addRequestedExtension(const char*) {}
+    // Use the forward-declared TSymbol and std::map
+    const std::map<std::string, TSymbol*>& getSymbolTable() const { static std::map<std::string, TSymbol*> map; return map; }
     bool improperStraddle(const TType& type, int offset, int len) const { return false; }
     int getBaseAlignmentScalar(const TType& type, int& offset) const { return 0; }
     int getMemberAlignment(const TType& type, int& offset, int& memberSize, 
@@ -71,48 +89,87 @@ class SpvOptions {};
 class SpvBuildLogger {};
 
 // Implement TShader methods (NOT redefining the class)
+// Add visibility attribute to ensure export
+__attribute__((visibility("default")))
 TShader::TShader(EShLanguage stage) {}
+
+__attribute__((visibility("default")))
 TShader::~TShader() {}
+
+__attribute__((visibility("default")))
 void TShader::setStringsWithLengths(const char* const* strings, const int* lengths, int n) {}
+
+__attribute__((visibility("default")))
 void TShader::addProcesses(const std::vector<std::string>& processes) {}
+
+__attribute__((visibility("default")))
 void TShader::setEntryPoint(const char* entryPoint) {}
+
+__attribute__((visibility("default")))
 void TShader::setSourceEntryPoint(const char* sourceEntryPointName) {}
+
+__attribute__((visibility("default")))
 bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
                   bool force, bool verbose, EShMessages messages) { return true; }
+
+__attribute__((visibility("default")))
 bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
                   bool force, bool verbose, EShMessages messages, Includer& includer) { return true; }
+
+__attribute__((visibility("default")))
 const char* TShader::getInfoLog() { return ""; }
+
+__attribute__((visibility("default")))
 const char* TShader::getInfoDebugLog() { return ""; }
-const TIntermediate* TShader::getIntermediate() const { return nullptr; }
+
+__attribute__((visibility("default")))
+const TIntermediate* TShader::getIntermediate() const {
+    return nullptr;
+}
+
+__attribute__((visibility("default")))
 void TShader::setStrings(const char* const* strings, int n) {}
+
+__attribute__((visibility("default")))
 void TShader::setAutoMapLocations(bool map) {}
+
+__attribute__((visibility("default")))
 void TShader::setAutoMapBindings(bool map) {}
 
 // Static global TBuiltInResource for simplicity
 TBuiltInResource DefaultTBuiltInResource;
 
 // Define all necessary global functions - make sure they're exported
+// Add visibility attribute
+__attribute__((visibility("default")))
 TPoolAllocator* GetThreadPoolAllocator() { 
     static TPoolAllocator pool;
     return &pool; 
 }
 
+__attribute__((visibility("default")))
 int GetKhronosToolId() { return 0; }
 
+__attribute__((visibility("default")))
 void InitializeProcess() {}
 
+__attribute__((visibility("default")))
 void FinalizeProcess() {}
 
 // Export key functions NCNN needs with C linkage to avoid name mangling issues
 extern "C" {
+    __attribute__((visibility("default"))) // Add visibility here too
     TBuiltInResource* GetDefaultResources() {
+        DefaultTBuiltInResource.maxLights = 32;
+        DefaultTBuiltInResource.maxClipPlanes = 6;
+        DefaultTBuiltInResource.maxTextureUnits = 32;
         return &DefaultTBuiltInResource;
     }
 }
 
 // Export GlslangToSpv with all variations needed
-
-// Version with SpvBuildLogger and SpvOptions (matches header default)
+// Add visibility attribute
+__attribute__((visibility("default")))
 void GlslangToSpv(const TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv,
                  SpvBuildLogger* logger,
@@ -120,14 +177,14 @@ void GlslangToSpv(const TIntermediate& intermediate,
     spirv.clear();
 }
 
-// Version with only SpvOptions* (matches linker error)
+__attribute__((visibility("default")))
 void GlslangToSpv(const TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv,
                  SpvOptions* options) {
     spirv.clear();
 }
 
-// Version with no logger or options (matches header overload)
+__attribute__((visibility("default")))
 void GlslangToSpv(const TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv) {
     spirv.clear();
