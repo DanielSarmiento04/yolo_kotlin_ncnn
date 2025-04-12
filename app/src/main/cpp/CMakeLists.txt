@@ -5,11 +5,6 @@ project("yolo_kotlin_ncnn")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set global C++ flags BEFORE defining libraries
-# -fvisibility=hidden: Make symbols hidden by default
-# -fno-rtti -fno-exceptions: Match common NCNN build settings
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden -fno-rtti -fno-exceptions")
-
 # Enable Vulkan support
 add_definitions(-DNCNN_VULKAN=1)
 
@@ -22,11 +17,12 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include
 )
 
-# Build the glslang stub library as STATIC
+# Build the glslang stub back as a STATIC library
 add_library(glslang_stub STATIC
     glslang_stub.cpp
 )
-# Symbols within glslang_stub.cpp marked with __attribute__((visibility("default"))) will be exported
+# Ensure symbols are exported from the static lib
+target_compile_options(glslang_stub PRIVATE -fvisibility=default)
 
 # Find the Vulkan library
 find_library(vulkan-lib vulkan)
@@ -46,10 +42,13 @@ set_target_properties(ncnn PROPERTIES IMPORTED_LOCATION
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a)
 message(STATUS "Importing NCNN library from: ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a")
 
-# Build the main native library
+# Build the main native library (only native-lib.cpp source here)
 add_library(native-lib SHARED
     native-lib.cpp
 )
+
+# Explicitly enable RTTI and exceptions for native-lib
+target_compile_options(native-lib PRIVATE -frtti -fexceptions)
 
 # Link libraries to native-lib
 target_link_libraries(native-lib
@@ -60,15 +59,18 @@ target_link_libraries(native-lib
     ${jnigraphics-lib}
     ${vulkan-lib}
 
+    # Explicitly link the C++ shared library
+    c++_shared
+
     # OpenMP
     OpenMP::OpenMP_CXX
 
-    # Force inclusion of all objects from glslang_stub static library
+    # Link glslang_stub static library with whole-archive *before* ncnn
     -Wl,--whole-archive
     glslang_stub
     -Wl,--no-whole-archive
 
-    # Link NCNN *after* glslang_stub
+    # Link NCNN *after* the stub
     ncnn
 
     # Other dependencies
