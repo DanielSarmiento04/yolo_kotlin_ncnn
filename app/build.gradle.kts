@@ -23,8 +23,9 @@ android {
         externalNativeBuild {
             cmake {
                 arguments("-DANDROID_STL=c++_shared", 
-                          "-DANDROID_ARM_NEON=ON")
-                cppFlags("-fopenmp", "-DNCNN_VULKAN=0")
+                          "-DANDROID_ARM_NEON=ON",
+                          "-DCMAKE_BUILD_TYPE=Release")
+                cppFlags("-fopenmp", "-std=c++11", "-fno-rtti", "-fno-exceptions")
                 abiFilters("arm64-v8a")
             }
         }
