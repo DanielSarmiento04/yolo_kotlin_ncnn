@@ -3,30 +3,16 @@ project("yolo_kotlin_ncnn")
 
 set(CMAKE_CXX_STANDARD 11)
 
-# Enable Vulkan for NCNN at compile time
+# Enable Vulkan support
 add_definitions(-DNCNN_VULKAN=1)
 
-# Set proper include directories for ncnn and glslang
+# Set proper include directories
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include)
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/ncnn)
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/glslang)
+include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/glslang/Include)
 include_directories(${CMAKE_SOURCE_DIR}/ncnn_include/glslang/SPIRV)
-
-# Add this after the initial include_directories block
-
-# Create symbolic link to ensure NCNN finds our stub header
-if(EXISTS ${CMAKE_SOURCE_DIR}/ncnn_include/glslang/SPIRV)
-    # Only create if the directory exists but our file doesn't
-    if(NOT EXISTS ${CMAKE_SOURCE_DIR}/ncnn_include/glslang/SPIRV/GlslangToSpv.h)
-        # Copy our stub to the actual include location
-        configure_file(${CMAKE_SOURCE_DIR}/glslang_stub.h 
-                      ${CMAKE_SOURCE_DIR}/ncnn_include/glslang/SPIRV/GlslangToSpv.h 
-                      COPYONLY)
-        message(STATUS "Created glslang stub in include directory")
-    endif()
-endif()
-
 
 # Find and enable OpenMP
 find_package(OpenMP)
@@ -36,7 +22,7 @@ if(OpenMP_CXX_FOUND)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
 
-# Compile the glslang stub separately with all symbols exported
+# Compile the glslang stub with all symbols exported
 add_library(glslang_stub STATIC
     glslang_stub.cpp
 )
@@ -53,21 +39,27 @@ add_library(native-lib SHARED
 )
 
 # Define OpenMP library path - Android NDK r21+ includes libomp
-set(OPENMP_LIB ${CMAKE_SOURCE_DIR}/libs/libomp.so)
-if(NOT EXISTS ${OPENMP_LIB})
-    # If file doesn't exist, use the NDK-provided one (in newer NDK versions)
-    message(STATUS "Using NDK-provided OpenMP library")
+if(OpenMP_CXX_FOUND)
     set(OPENMP_LIB OpenMP::OpenMP_CXX)
+else()
+    set(OPENMP_LIB ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libomp.so)
+    if(NOT EXISTS ${OPENMP_LIB})
+        message(FATAL_ERROR "OpenMP library not found. Please install NDK r21+ or provide libomp.so")
+    endif()
 endif()
 
-# Include NCNN library
+# Include NCNN library with proper ABI path
 add_library(ncnn_static STATIC IMPORTED)
-set_target_properties(ncnn_static PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/libncnn.a)
+set_target_properties(ncnn_static PROPERTIES IMPORTED_LOCATION 
+    ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a)
 
 # Include Vulkan library
 find_library(vulkan-lib vulkan)
+if(NOT vulkan-lib)
+    message(FATAL_ERROR "Vulkan library not found")
+endif()
 
-# Link with ncnn, our glslang stub, and Vulkan
+# Link with ncnn, glslang stub, and other needed libraries
 target_link_libraries(native-lib
     glslang_stub  # Link our stub first so its symbols are used
     ncnn_static

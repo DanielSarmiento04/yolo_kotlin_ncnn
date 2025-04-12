@@ -18,27 +18,6 @@ enum EShMessages {
     EShMsgReadHlsl = (1 << 4) 
 };
 
-// Forward declare the std namespace classes used in function signatures
-namespace std {
-namespace __ndk1 {
-    // These are just forward declarations - don't redefine the actual types
-    template<class T> class allocator;
-    template<class T, class A> class vector;
-    template<class charT, class traits, class Allocator> class basic_string;
-    typedef basic_string<char, std::char_traits<char>, allocator<char>> string;
-}}
-
-// Simplified class stubs - only what NCNN needs
-class TVector {
-public:
-    TVector() {}
-};
-
-class TType {
-public:
-    TType() {}
-};
-
 class TQualifier {
 public:
     TQualifier() {}
@@ -54,6 +33,17 @@ public:
     TIntermTyped() {}
 };
 
+// Forward declarations for classes needed by TIntermediate
+class TType {
+public:
+    TType() {}
+};
+
+class TVector {
+public:
+    TVector() {}
+};
+
 class TIntermediate {
 public:
     TIntermediate() {}
@@ -62,6 +52,10 @@ public:
     int getMemberAlignment(const TType& type, int& offset, int& memberSize, 
                           int layoutPacking, bool roundUp) const { return 0; }
     TVector findLinkerObjects() const { return TVector(); }
+    TIntermTyped* findFunction(bool ignorePrototypes) const { return nullptr; }
+    bool setLocalSize(int dim, int size) { return true; }
+    void addToCallGraph(const TString& caller, const TString& callee) {}
+    TIntermediate* getIntermediate() const { return nullptr; }
 };
 
 // Pool allocator for the compiler
@@ -72,40 +66,47 @@ public:
     void* allocate(unsigned long size) { return nullptr; }
 };
 
+// Options for SPIRV generation
 class SpvOptions {};
-
 class SpvBuildLogger {};
 
+// String handling for glslang
+class TString {
+public:
+    TString(const char* s = "") {}
+    const char* c_str() const { return ""; }
+};
+
+// TShader class with all needed methods that NCNN calls
 class TShader {
 public:
-    // Define Includer class inside TShader
     class Includer {
     public:
         virtual ~Includer() {}
     };
 
-    // IMPORTANT: Match exact signature from error message
+    // Constructor and destructor
     TShader(EShLanguage stage) {}
     ~TShader() {}
-
-    // Exact method signatures from error message
+    
+    // Methods needed by NCNN's GPU module
     void setStringsWithLengths(const char* const* strings, const int* lengths, int n) {}
-    
-    void addProcesses(const std::__ndk1::vector<std::__ndk1::basic_string<char, std::__ndk1::char_traits<char>, 
-                    std::__ndk1::allocator<char>>, std::__ndk1::allocator<std::__ndk1::basic_string<char, 
-                    std::__ndk1::char_traits<char>, std::__ndk1::allocator<char>>>>& processes) {}
-    
+    void addProcesses(const std::vector<std::string>& processes) {}
     void setEntryPoint(const char* entryPoint) {}
     void setSourceEntryPoint(const char* sourceEntryPointName) {}
-    
     bool parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
               bool force, bool verbose, EShMessages messages, TShader::Includer& includer) { return true; }
-    
     const char* getInfoLog() { return ""; }
     const char* getInfoDebugLog() { return ""; }
+    const TIntermediate* getIntermediate() const { return nullptr; }
+    
+    // Additional methods that might be needed
+    void setStrings(const char* const* strings, int n) {}
+    void setAutoMapLocations(bool map) {}
+    void setAutoMapBindings(bool map) {}
 };
 
-// IMPORTANT: Define these functions directly in the glslang namespace
+// Define all necessary global functions
 TPoolAllocator* GetThreadPoolAllocator() { 
     static TPoolAllocator pool;
     return &pool; 
@@ -117,15 +118,13 @@ void InitializeProcess() {}
 
 void FinalizeProcess() {}
 
-// Export GlslangToSpv with exact signature from error message
+// Export GlslangToSpv with all variations needed
 void GlslangToSpv(const TIntermediate& intermediate, 
-                std::__ndk1::vector<unsigned int, std::__ndk1::allocator<unsigned int>>& spirv,
-                SpvOptions* options = nullptr) {}
-
-// Additional overload matching what the error messages show
+                 std::vector<unsigned int>& spirv,
+                 SpvBuildLogger* logger = nullptr,
+                 SpvOptions* options = nullptr) {}
+                 
 void GlslangToSpv(const TIntermediate& intermediate, 
-                std::__ndk1::vector<unsigned int, std::__ndk1::allocator<unsigned int>>& spirv,
-                SpvBuildLogger* logger,
-                SpvOptions* options) {}
+                 std::vector<unsigned int>& spirv) {}
 
 } // namespace glslang

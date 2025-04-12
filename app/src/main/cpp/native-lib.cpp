@@ -195,17 +195,165 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detect(JNIEnv* env, jobject /* 
     // Lock to ensure thread safety
     ncnn::MutexLockGuard g(lock);
     
-    // Implementation for detection would go here
-    // This would involve:
-    // 1. Converting imageBytes to ncnn::Mat
-    // 2. Processing with YOLO model
-    // 3. Parsing results
-    // 4. Returning detection array
+    // Get image data from Java
+    jbyte* data = env->GetByteArrayElements(imageBytes, nullptr);
+    if (!data) {
+        LOGE("Failed to get image data");
+        return nullptr;
+    }
     
-    // Placeholder return
-    jfloatArray result = env->NewFloatArray(1);
-    jfloat fill[1] = {0.0f};
-    env->SetFloatArrayRegion(result, 0, 1, fill);
+    // Convert RGBA to RGB
+    ncnn::Mat in = ncnn::Mat(width, height, 3);
+    const unsigned char* rgba = reinterpret_cast<const unsigned char*>(data);
+    
+    #pragma omp parallel for num_threads(4)
+    for (int y = 0; y < height; y++) {
+        const unsigned char* rgba_row = rgba + y * width * 4;
+        unsigned char* rgb_row = in.row<unsigned char>(y);
+        
+        for (int x = 0; x < width; x++) {
+            rgb_row[0] = rgba_row[0]; // R
+            rgb_row[1] = rgba_row[1]; // G
+            rgb_row[2] = rgba_row[2]; // B
+            
+            rgba_row += 4;
+            rgb_row += 3;
+        }
+    }
+    
+    // Release byte array
+    env->ReleaseByteArrayElements(imageBytes, data, JNI_ABORT);
+    
+    // YOLOv5 prefers 640x640 input
+    const int target_size = 640;
+    
+    int img_w = width;
+    int img_h = height;
+    
+    // Scale to maintain aspect ratio
+    float scale = 1.0f;
+    if (img_w > img_h) {
+        scale = (float)target_size / img_w;
+    } else {
+        scale = (float)target_size / img_h;
+    }
+    
+    int scaled_w = int(img_w * scale);
+    int scaled_h = int(img_h * scale);
+    
+    // Resize
+    ncnn::Mat in_resized;
+    ncnn::resize_bilinear(in, in_resized, scaled_w, scaled_h);
+    
+    // Pad to square
+    ncnn::Mat in_pad(target_size, target_size, 3);
+    in_pad.fill(114.0f); // Gray padding
+    
+    int dx = (target_size - scaled_w) / 2;
+    int dy = (target_size - scaled_h) / 2;
+    
+    // Copy the resized image to the center of the padded image
+    for (int y = 0; y < scaled_h; y++) {
+        const float* src_row = in_resized.row(y);
+        float* dst_row = in_pad.row(y + dy) + dx * 3;
+        memcpy(dst_row, src_row, scaled_w * 3 * sizeof(float));
+    }
+    
+    // Normalize
+    const float mean_vals[3] = {0, 0, 0};
+    const float norm_vals[3] = {1/255.0f, 1/255.0f, 1/255.0f};
+    in_pad.substract_mean_normalize(mean_vals, norm_vals);
+    
+    // Create extractor from the model
+    ncnn::Extractor ex = yoloNet.create_extractor();
+    
+    // Set input
+    ex.input("images", in_pad);
+    
+    // Get output
+    ncnn::Mat out;
+    ex.extract("output", out);
+    
+    // Parse YOLOv5 detection output
+    std::vector<Object> objects;
+    
+    // The output is a 25200 x 85 (80 classes + 5) matrix
+    // (25200 = 3 * (80*80 + 40*40 + 20*20)) anchors
+    // For each row: [x, y, w, h, confidence, 80 class probabilities]
+    
+    for (int i = 0; i < out.h; i++) {
+        const float* values = out.row(i);
+        
+        float obj_conf = values[4];
+        if (obj_conf < 0.25) { // Confidence threshold
+            continue;
+        }
+        
+        // Find the class with the highest probability
+        float max_prob = 0.0f;
+        int max_class = 0;
+        for (int j = 0; j < 80; j++) {
+            float class_prob = values[5 + j];
+            if (class_prob > max_prob) {
+                max_prob = class_prob;
+                max_class = j;
+            }
+        }
+        
+        // Final confidence
+        float confidence = obj_conf * max_prob;
+        if (confidence < 0.25) { // Confidence threshold
+            continue;
+        }
+        
+        Object obj;
+        obj.label = max_class;
+        obj.prob = confidence;
+        
+        // The x,y,w,h are relative to the 640x640 input
+        obj.x = values[0] / target_size;
+        obj.y = values[1] / target_size;
+        obj.w = values[2] / target_size;
+        obj.h = values[3] / target_size;
+        
+        objects.push_back(obj);
+    }
+    
+    // Apply NMS (Non-maximum suppression)
+    std::vector<int> picked;
+    nms_sorted_bboxes(objects, picked, 0.45f); // 0.45 is the NMS threshold
+    
+    // Format results for Java
+    std::vector<Object> results;
+    for (int i : picked) {
+        results.push_back(objects[i]);
+    }
+    
+    // Create float array: [count, x, y, w, h, label, confidence, ...]
+    int result_count = results.size();
+    int float_array_size = 1 + result_count * 6; // 1 for count + 6 values per detection
+    
+    jfloatArray result = env->NewFloatArray(float_array_size);
+    if (result == nullptr) {
+        LOGE("Failed to create float array");
+        return nullptr;
+    }
+    
+    std::vector<float> resultData(float_array_size);
+    resultData[0] = (float)result_count;
+    
+    for (int i = 0; i < result_count; i++) {
+        const Object& obj = results[i];
+        int offset = 1 + i * 6;
+        resultData[offset + 0] = obj.x;
+        resultData[offset + 1] = obj.y;
+        resultData[offset + 2] = obj.w;
+        resultData[offset + 3] = obj.h;
+        resultData[offset + 4] = (float)obj.label;
+        resultData[offset + 5] = obj.prob;
+    }
+    
+    env->SetFloatArrayRegion(result, 0, float_array_size, resultData.data());
     
     return result;
 }
@@ -216,6 +364,9 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_releaseNative(JNIEnv* env, jobj
     // Clean up NCNN resources
     yoloNet.clear();
     modelLoaded = false;
+    
+    // Release Vulkan instance
     ncnn::destroy_gpu_instance();
+    
     LOGI("Resources released");
 }
