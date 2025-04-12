@@ -8,12 +8,24 @@
 struct TBuiltInResource;
 
 namespace glslang {
-    // Define enumerations needed by NCNN
-    enum EShLanguage { 
-        EShLangVertex, 
+    // Define enumerations needed by NCNN - Match ncnn's header definition
+    typedef enum {
+        EShLangVertex,
+        EShLangTessControl,
+        EShLangTessEvaluation,
+        EShLangGeometry,
         EShLangFragment,
-        EShLangCompute
-    };
+        EShLangCompute,
+        EShLangRayGen,
+        EShLangIntersect,
+        EShLangAnyHit,
+        EShLangClosestHit,
+        EShLangMiss,
+        EShLangCallable,
+        EShLangTask,
+        EShLangMesh,
+        EShLangCount, // Add count marker if present in original
+    } EShLanguage;
     
     enum EProfile { 
         ENoProfile, 
@@ -69,26 +81,32 @@ namespace glslang {
         void setAutoMapLocations(bool map);
         void setAutoMapBindings(bool map);
     };
-    
-    // Declare extern functions that NCNN needs
-    TPoolAllocator* GetThreadPoolAllocator();
-    int GetKhronosToolId();
+
+    // Declare GlslangToSpv within the glslang namespace
+    void GlslangToSpv(const glslang::TIntermediate& intermediate,
+                     std::vector<unsigned int>& spirv,
+                     glslang::SpvBuildLogger* logger = nullptr,
+                     glslang::SpvOptions* options = nullptr);
+
+    void GlslangToSpv(const glslang::TIntermediate& intermediate,
+                     std::vector<unsigned int>& spirv);
+
+    // Add the 3-argument overload declaration if needed by ncnn
+    void GlslangToSpv(const glslang::TIntermediate& intermediate,
+                     std::vector<unsigned int>& spirv,
+                     glslang::SpvOptions* options);
+
+    // Move Initialize/FinalizeProcess into the namespace
     void InitializeProcess();
     void FinalizeProcess();
-    
-    // Forward declare the GlslangToSpv function
-    void GlslangToSpv(const TIntermediate& intermediate, 
-                     std::vector<unsigned int>& spirv,
-                     SpvBuildLogger* logger = nullptr,
-                     SpvOptions* options = nullptr);
-    
-    void GlslangToSpv(const TIntermediate& intermediate, 
-                     std::vector<unsigned int>& spirv);
-}
 
-// C-style API for getting default resources (used by NCNN)
+} // namespace glslang
+
+// C-style API declarations (Keep only truly C-style functions here)
 extern "C" {
     TBuiltInResource* GetDefaultResources();
+    glslang::TPoolAllocator* GetThreadPoolAllocator();
+    int GetKhronosToolId();
 }
 
 #endif // GLSLANG_STUB_H

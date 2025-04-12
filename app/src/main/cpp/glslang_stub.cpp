@@ -88,106 +88,89 @@ public:
 class SpvOptions {};
 class SpvBuildLogger {};
 
-// Implement TShader methods (NOT redefining the class)
-// Add visibility attribute to ensure export
+// Implement TShader methods (Remove visibility attribute from definitions)
+// Add visibility attribute specifically for the constructor
 __attribute__((visibility("default")))
 TShader::TShader(EShLanguage stage) {}
 
-__attribute__((visibility("default")))
 TShader::~TShader() {}
 
-__attribute__((visibility("default")))
 void TShader::setStringsWithLengths(const char* const* strings, const int* lengths, int n) {}
 
-__attribute__((visibility("default")))
 void TShader::addProcesses(const std::vector<std::string>& processes) {}
 
-__attribute__((visibility("default")))
 void TShader::setEntryPoint(const char* entryPoint) {}
 
-__attribute__((visibility("default")))
 void TShader::setSourceEntryPoint(const char* sourceEntryPointName) {}
 
-__attribute__((visibility("default")))
 bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
                   bool force, bool verbose, EShMessages messages) { return true; }
 
-__attribute__((visibility("default")))
 bool TShader::parse(const TBuiltInResource* res, int defaultVersion, EProfile profile, 
                   bool force, bool verbose, EShMessages messages, Includer& includer) { return true; }
 
-__attribute__((visibility("default")))
 const char* TShader::getInfoLog() { return ""; }
 
-__attribute__((visibility("default")))
 const char* TShader::getInfoDebugLog() { return ""; }
 
-__attribute__((visibility("default")))
 const TIntermediate* TShader::getIntermediate() const {
-    return nullptr;
+    static TIntermediate dummyIntermediate;
+    return &dummyIntermediate;
 }
 
-__attribute__((visibility("default")))
 void TShader::setStrings(const char* const* strings, int n) {}
 
-__attribute__((visibility("default")))
 void TShader::setAutoMapLocations(bool map) {}
 
-__attribute__((visibility("default")))
 void TShader::setAutoMapBindings(bool map) {}
 
-// Static global TBuiltInResource for simplicity
-TBuiltInResource DefaultTBuiltInResource;
-
-// Define all necessary global functions - make sure they're exported
-// Add visibility attribute
-__attribute__((visibility("default")))
-TPoolAllocator* GetThreadPoolAllocator() { 
-    static TPoolAllocator pool;
-    return &pool; 
-}
-
-__attribute__((visibility("default")))
-int GetKhronosToolId() { return 0; }
-
-__attribute__((visibility("default")))
+// Define InitializeProcess/FinalizeProcess within the namespace (Remove visibility attribute)
 void InitializeProcess() {}
 
-__attribute__((visibility("default")))
 void FinalizeProcess() {}
 
-// Export key functions NCNN needs with C linkage to avoid name mangling issues
+} // namespace glslang
+
+// Define global C-style functions within extern "C"
 extern "C" {
-    __attribute__((visibility("default"))) // Add visibility here too
+    // Static global TBuiltInResource for simplicity
+    TBuiltInResource DefaultTBuiltInResource;
+
+    // Remove visibility attribute
     TBuiltInResource* GetDefaultResources() {
         DefaultTBuiltInResource.maxLights = 32;
         DefaultTBuiltInResource.maxClipPlanes = 6;
         DefaultTBuiltInResource.maxTextureUnits = 32;
         return &DefaultTBuiltInResource;
     }
-}
 
-// Export GlslangToSpv with all variations needed
-// Add visibility attribute
-__attribute__((visibility("default")))
-void GlslangToSpv(const TIntermediate& intermediate,
+    // Remove visibility attribute
+    glslang::TPoolAllocator* GetThreadPoolAllocator() { 
+        static glslang::TPoolAllocator pool;
+        return &pool; 
+    }
+
+    // Remove visibility attribute
+    int GetKhronosToolId() { return 0; }
+
+} // extern "C"
+
+// Define GlslangToSpv functions as regular C++ functions (Remove visibility attribute)
+void glslang::GlslangToSpv(const glslang::TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv,
-                 SpvBuildLogger* logger,
-                 SpvOptions* options) {
-    spirv.clear();
+                 glslang::SpvBuildLogger* logger,
+                 glslang::SpvOptions* options) {
+    spirv.clear(); // Minimal stub implementation
 }
 
-__attribute__((visibility("default")))
-void GlslangToSpv(const TIntermediate& intermediate,
-                 std::vector<unsigned int>& spirv,
-                 SpvOptions* options) {
-    spirv.clear();
-}
-
-__attribute__((visibility("default")))
-void GlslangToSpv(const TIntermediate& intermediate,
+void glslang::GlslangToSpv(const glslang::TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv) {
-    spirv.clear();
+    glslang::GlslangToSpv(intermediate, spirv, nullptr, nullptr);
 }
 
-} // namespace glslang
+// Define the missing 3-argument overload (Remove visibility attribute)
+void glslang::GlslangToSpv(const glslang::TIntermediate& intermediate,
+                 std::vector<unsigned int>& spirv,
+                 glslang::SpvOptions* options) {
+    glslang::GlslangToSpv(intermediate, spirv, nullptr, options); // Call the 4-arg version
+}

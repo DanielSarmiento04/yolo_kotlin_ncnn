@@ -21,8 +21,8 @@ include_directories(
 add_library(glslang_stub STATIC
     glslang_stub.cpp
 )
-# Ensure symbols are exported from the static lib
-target_compile_options(glslang_stub PRIVATE -fvisibility=default)
+# Ensure symbols are exported and apply consistent compile options
+target_compile_options(glslang_stub PRIVATE -fvisibility=default -fno-rtti -fexceptions)
 
 # Find the Vulkan library
 find_library(vulkan-lib vulkan)
@@ -47,33 +47,29 @@ add_library(native-lib SHARED
     native-lib.cpp
 )
 
-# Explicitly enable RTTI and exceptions for native-lib
-target_compile_options(native-lib PRIVATE -frtti -fexceptions)
+# Explicitly disable RTTI and enable exceptions for native-lib
+target_compile_options(native-lib PRIVATE -fno-rtti -fexceptions)
 
 # Link libraries to native-lib
 target_link_libraries(native-lib
     PRIVATE
-    # System libraries
-    ${log-lib}
-    ${android-lib}
-    ${jnigraphics-lib}
-    ${vulkan-lib}
-
-    # Explicitly link the C++ shared library
-    c++_shared
-
-    # OpenMP
+    # Link OpenMP first
     OpenMP::OpenMP_CXX
 
-    # Link glslang_stub static library with whole-archive *before* ncnn
+    # Link NCNN *before* the stub
+    ncnn
+
+    # Link glslang_stub static library with whole-archive
     -Wl,--whole-archive
     glslang_stub
     -Wl,--no-whole-archive
 
-    # Link NCNN *after* the stub
-    ncnn
-
-    # Other dependencies
+    # Link system libraries, C++ STL, and math libraries last
+    ${log-lib}
+    ${android-lib}
+    ${jnigraphics-lib}
+    ${vulkan-lib}
+    c++_shared
     atomic
     m
 )
