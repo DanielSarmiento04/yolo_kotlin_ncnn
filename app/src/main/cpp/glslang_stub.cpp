@@ -88,9 +88,7 @@ public:
 class SpvOptions {};
 class SpvBuildLogger {};
 
-// Implement TShader methods (Remove visibility attribute from definitions)
-// Add visibility attribute specifically for the constructor
-__attribute__((visibility("default")))
+// Implement TShader methods (Remove visibility attributes from definitions)
 TShader::TShader(EShLanguage stage) {}
 
 TShader::~TShader() {}
@@ -124,7 +122,7 @@ void TShader::setAutoMapLocations(bool map) {}
 
 void TShader::setAutoMapBindings(bool map) {}
 
-// Define InitializeProcess/FinalizeProcess within the namespace (Remove visibility attribute)
+// Define InitializeProcess/FinalizeProcess within the namespace (Remove visibility attributes)
 void InitializeProcess() {}
 
 void FinalizeProcess() {}
@@ -134,7 +132,7 @@ void FinalizeProcess() {}
 // Define global C-style functions within extern "C"
 extern "C" {
     // Static global TBuiltInResource for simplicity
-    TBuiltInResource DefaultTBuiltInResource;
+    static TBuiltInResource DefaultTBuiltInResource; // Make static to avoid multiple definitions if header included elsewhere
 
     // Remove visibility attribute
     TBuiltInResource* GetDefaultResources() {
@@ -155,7 +153,7 @@ extern "C" {
 
 } // extern "C"
 
-// Define GlslangToSpv functions as regular C++ functions (Remove visibility attribute)
+// Define GlslangToSpv functions as regular C++ functions (Remove visibility attributes)
 void glslang::GlslangToSpv(const glslang::TIntermediate& intermediate,
                  std::vector<unsigned int>& spirv,
                  glslang::SpvBuildLogger* logger,
