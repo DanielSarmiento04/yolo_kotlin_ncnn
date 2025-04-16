@@ -29,16 +29,6 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include
 )
 
-# Build the glslang stub as a STATIC library
-add_library(glslang_stub STATIC
-    glslang_stub.cpp
-    glslang_stub.h
-)
-
-target_compile_options(glslang_stub PRIVATE
-    -fvisibility=default  # Override visibility for stub
-)
-
 # Find the Vulkan library
 find_library(vulkan-lib vulkan)
 if(NOT vulkan-lib)
@@ -51,17 +41,53 @@ find_library(log-lib log)
 find_library(android-lib android)
 find_library(jnigraphics-lib jnigraphics)
 
+# Import Precompiled NCNN and related libraries
+set(NCNN_PREBUILT_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI})
+
 # Import NCNN library
 add_library(ncnn STATIC IMPORTED)
-set_target_properties(ncnn PROPERTIES 
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a
-)
-
-# Ensure the NCNN library exists at the specified path
-if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a)
-    message(FATAL_ERROR "NCNN library not found at ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a")
+set(NCNN_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libncnn.a)
+if(NOT EXISTS ${NCNN_LIB_PATH})
+    message(FATAL_ERROR "NCNN library not found at ${NCNN_LIB_PATH}")
 endif()
-message(STATUS "Using NCNN library: ${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a")
+set_target_properties(ncnn PROPERTIES IMPORTED_LOCATION ${NCNN_LIB_PATH})
+message(STATUS "Using NCNN library: ${NCNN_LIB_PATH}")
+
+# Import glslang library
+add_library(glslang STATIC IMPORTED)
+set(GLSLANG_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libglslang.a)
+if(NOT EXISTS ${GLSLANG_LIB_PATH})
+    message(FATAL_ERROR "glslang library not found at ${GLSLANG_LIB_PATH}")
+endif()
+set_target_properties(glslang PROPERTIES IMPORTED_LOCATION ${GLSLANG_LIB_PATH})
+message(STATUS "Using glslang library: ${GLSLANG_LIB_PATH}")
+
+# Import SPIRV library
+add_library(SPIRV STATIC IMPORTED)
+set(SPIRV_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libSPIRV.a)
+if(NOT EXISTS ${SPIRV_LIB_PATH})
+    message(FATAL_ERROR "SPIRV library not found at ${SPIRV_LIB_PATH}")
+endif()
+set_target_properties(SPIRV PROPERTIES IMPORTED_LOCATION ${SPIRV_LIB_PATH})
+message(STATUS "Using SPIRV library: ${SPIRV_LIB_PATH}")
+
+# Import OGLCompiler library (Often needed by glslang)
+add_library(OGLCompiler STATIC IMPORTED)
+set(OGLCOMPILER_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libOGLCompiler.a)
+if(NOT EXISTS ${OGLCOMPILER_LIB_PATH})
+    message(FATAL_ERROR "OGLCompiler library not found at ${OGLCOMPILER_LIB_PATH}")
+endif()
+set_target_properties(OGLCompiler PROPERTIES IMPORTED_LOCATION ${OGLCOMPILER_LIB_PATH})
+message(STATUS "Using OGLCompiler library: ${OGLCOMPILER_LIB_PATH}")
+
+# Import OSDependent library (Often needed by glslang)
+add_library(OSDependent STATIC IMPORTED)
+set(OSDEPENDENT_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libOSDependent.a)
+if(NOT EXISTS ${OSDEPENDENT_LIB_PATH})
+    message(FATAL_ERROR "OSDependent library not found at ${OSDEPENDENT_LIB_PATH}")
+endif()
+set_target_properties(OSDependent PROPERTIES IMPORTED_LOCATION ${OSDEPENDENT_LIB_PATH})
+message(STATUS "Using OSDependent library: ${OSDEPENDENT_LIB_PATH}")
 
 # Build the main native library with JNI methods
 add_library(native-lib SHARED
@@ -75,16 +101,14 @@ target_compile_options(native-lib PRIVATE
 
 # Define proper linking order
 target_link_libraries(native-lib
-    # Link NCNN first. It depends on symbols from glslang_stub.
-    # Using --whole-archive for ncnn might still be needed if it has complex internal dependencies
-    # or if symbols aren't being exported correctly otherwise, but let's keep it for now.
-    -Wl,--whole-archive
+    # Link NCNN first
     ncnn
-    -Wl,--no-whole-archive
 
-    # Link glslang stub AFTER ncnn. The linker should resolve symbols needed by ncnn from glslang_stub.
-    # Remove --whole-archive for the stub; it's often not needed for simple stubs.
-    glslang_stub
+    # Link glslang and its dependencies AFTER ncnn
+    glslang
+    SPIRV
+    OGLCompiler
+    OSDependent
 
     # Link OpenMP
     OpenMP::OpenMP_CXX
@@ -97,7 +121,7 @@ target_link_libraries(native-lib
     ${android-lib}
     ${jnigraphics-lib}
 
-    # Additional libraries that might be required for NCNN
+    # Additional libraries that might be required
     atomic
     m
 )
