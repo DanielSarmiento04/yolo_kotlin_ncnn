@@ -86,6 +86,35 @@ endif()
 set_target_properties(OSDependent PROPERTIES IMPORTED_LOCATION ${OSDEPENDENT_LIB_PATH})
 message(STATUS "Found OSDependent library: ${OSDEPENDENT_LIB_PATH}")
 
+# --- Add missing glslang-related libraries ---
+
+# Define MachineIndependent library as IMPORTED STATIC
+add_library(MachineIndependent STATIC IMPORTED GLOBAL)
+set(MACHINEINDEPENDENT_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libMachineIndependent.a)
+if(NOT EXISTS ${MACHINEINDEPENDENT_LIB_PATH})
+    message(FATAL_ERROR "libMachineIndependent.a not found at ${MACHINEINDEPENDENT_LIB_PATH}")
+endif()
+set_target_properties(MachineIndependent PROPERTIES IMPORTED_LOCATION ${MACHINEINDEPENDENT_LIB_PATH})
+message(STATUS "Found MachineIndependent library: ${MACHINEINDEPENDENT_LIB_PATH}")
+
+# Define GenericCodeGen library as IMPORTED STATIC
+add_library(GenericCodeGen STATIC IMPORTED GLOBAL)
+set(GENERICCODEGEN_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libGenericCodeGen.a)
+if(NOT EXISTS ${GENERICCODEGEN_LIB_PATH})
+    message(FATAL_ERROR "libGenericCodeGen.a not found at ${GENERICCODEGEN_LIB_PATH}")
+endif()
+set_target_properties(GenericCodeGen PROPERTIES IMPORTED_LOCATION ${GENERICCODEGEN_LIB_PATH})
+message(STATUS "Found GenericCodeGen library: ${GENERICCODEGEN_LIB_PATH}")
+
+# Define glslang-default-resource-limits library as IMPORTED STATIC
+add_library(glslang-default-resource-limits STATIC IMPORTED GLOBAL)
+set(GLSLANG_DEF_RES_LIMITS_LIB_PATH ${NCNN_PREBUILT_LIBS_DIR}/libglslang-default-resource-limits.a)
+if(NOT EXISTS ${GLSLANG_DEF_RES_LIMITS_LIB_PATH})
+    message(FATAL_ERROR "libglslang-default-resource-limits.a not found at ${GLSLANG_DEF_RES_LIMITS_LIB_PATH}")
+endif()
+set_target_properties(glslang-default-resource-limits PROPERTIES IMPORTED_LOCATION ${GLSLANG_DEF_RES_LIMITS_LIB_PATH})
+message(STATUS "Found glslang-default-resource-limits library: ${GLSLANG_DEF_RES_LIMITS_LIB_PATH}")
+
 # --- Android Libraries ---
 # Find required Android system libraries
 find_library(log-lib log) # For logging using __android_log_print
@@ -114,6 +143,9 @@ target_link_libraries(native-lib
     SPIRV
     OGLCompiler
     OSDependent
+    MachineIndependent             # Added
+    GenericCodeGen                 # Added
+    glslang-default-resource-limits # Added
 
     # Link OpenMP if found
     OpenMP::OpenMP_CXX
@@ -127,7 +159,6 @@ target_link_libraries(native-lib
     ${jnigraphics-lib}
 
     # Link standard C/C++ libraries if needed (often implicitly linked)
-    # atomic might be needed by some NCNN operations or threading models
     atomic
     m # Math library
 )
