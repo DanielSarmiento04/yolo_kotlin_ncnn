@@ -6,15 +6,19 @@ plugins {
 
 android {
     namespace = "com.example.yolo_kotlin_ncnn"
-    compileSdk = 35
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.yolo_kotlin_ncnn"
-        minSdk = 30
-        targetSdk = 35
+        minSdk = 24
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        vectorDrawables {
+            useSupportLibrary = true
+        }
 
         ndk {
             abiFilters.add("arm64-v8a")
@@ -22,8 +26,6 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments("-DANDROID_STL=c++_shared", 
-                          "-DANDROID_ARM_NEON=ON")
                 abiFilters("arm64-v8a")
             }
         }
@@ -43,21 +45,34 @@ android {
                 "proguard-rules.pro"
             )
         }
+        debug {
+            // Optionally configure native build settings for debug
+            // externalNativeBuild {
+            //     cmake {
+            //         cppFlags += "-O0 -g" // Example debug flags
+            //     }
+            // }
+        }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
     kotlinOptions {
-        jvmTarget = "11"
+        jvmTarget = "1.8"
     }
     buildFeatures {
         compose = true
     }
-
-    packagingOptions {
+    composeOptions {
+        kotlinCompilerExtensionVersion = libs.versions.kotlin.get()
+    }
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 }

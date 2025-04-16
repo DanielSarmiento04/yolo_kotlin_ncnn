@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,22 +19,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.yolo_kotlin_ncnn.ui.theme.Yolo_kotlin_ncnnTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.util.Log
 
 class MainActivity : ComponentActivity() {
-    private lateinit var detector: NcnnDetector
+    private val detector: NcnnDetector by lazy { NcnnDetector(this) }
     private val TAG = "MainActivity"
-    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        
-        // Initialize detector
-        detector = NcnnDetector(this)
-        
+
         setContent {
             Yolo_kotlin_ncnnTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    // Use the improved Vulkan status checker UI
                     NcnnStatusScreen(
                         modifier = Modifier.padding(innerPadding),
                         detector = detector
@@ -42,34 +43,51 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    
+
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "onDestroy called, releasing NCNN detector.")
         detector.release()
     }
 }
 
 @Composable
 fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
-    var isInitialized by remember { mutableStateOf(false) }
-    var isModelLoaded by remember { mutableStateOf(false) }
-    var hasVulkan by remember { mutableStateOf(false) }
-    
+    var isInitialized by remember { mutableStateOf<Boolean?>(null) }
+    var isModelLoaded by remember { mutableStateOf<Boolean?>(null) }
+    var hasVulkan by remember { mutableStateOf<Boolean?>(null) }
+    var statusMessage by remember { mutableStateOf("Initializing...") }
+
     LaunchedEffect(key1 = detector) {
-        isInitialized = detector.init()
-        if (isInitialized) {
-            isModelLoaded = detector.loadModel()
+        statusMessage = "Initializing NCNN..."
+        val initResult = withContext(Dispatchers.IO) {
+            detector.init()
+        }
+        isInitialized = initResult
+
+        if (initResult) {
             hasVulkan = detector.isVulkanSupported()
+            statusMessage = "Loading model..."
+            val loadResult = withContext(Dispatchers.IO) {
+                detector.loadModel()
+            }
+            isModelLoaded = loadResult
+            statusMessage = if (loadResult) "Initialization and model load complete." else "Model loading failed."
+        } else {
+            statusMessage = "NCNN Initialization failed."
+            isModelLoaded = false
+            hasVulkan = false
         }
     }
-    
+
     Column(modifier = modifier.padding(16.dp)) {
-        // Use the VulkanStatusChecker imported from its own file
         VulkanStatusChecker(
-            isInitialized = isInitialized,
-            isModelLoaded = isModelLoaded,
-            hasVulkan = hasVulkan
+            isInitialized = isInitialized ?: false,
+            isModelLoaded = isModelLoaded ?: false,
+            hasVulkan = hasVulkan ?: false
         )
+
+        Text(text = statusMessage, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
@@ -77,11 +95,10 @@ fun NcnnStatusScreen(modifier: Modifier = Modifier, detector: NcnnDetector) {
 @Composable
 fun StatusPreview() {
     Yolo_kotlin_ncnnTheme {
-        // This now refers to the VulkanStatusChecker from VulkanStatusChecker.kt
         VulkanStatusChecker(
-            isInitialized = true,
-            isModelLoaded = true,
-            hasVulkan = true
+            isInitialized = false,
+            isModelLoaded = false,
+            hasVulkan = false
         )
     }
 }

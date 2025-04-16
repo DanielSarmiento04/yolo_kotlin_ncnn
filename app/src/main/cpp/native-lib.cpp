@@ -1,361 +1,393 @@
 #include <jni.h>
-#include <android/log.h>
-#include <android/asset_manager_jni.h>
-#include "ncnn/net.h"
-#include "ncnn/gpu.h"
+#include <string>
 #include <vector>
-#include <algorithm>
+#include <algorithm> // For std::max, std::min
+#include <math.h>    // For expf
 
-#define LOG_TAG "NCNN"
+// Android Logging
+#include <android/log.h>
+#define LOG_TAG "NCNN_Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Create an instance of the NCNN Net that you'll use for inference.
-static ncnn::Net yoloNet;
-static ncnn::Mutex lock;
-static bool hasGPU = false;
-static bool modelLoaded = false;
+// Asset Manager (for loading models from assets)
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
 
+// NCNN Headers
+#include "ncnn/net.h"
+#include "ncnn/gpu.h"
+#include "ncnn/layer.h" // Required for custom layers if any
+
+// Global NCNN Net instance and state variables
+static ncnn::Net yoloNet;
+static ncnn::Mutex yoloNetLock; // For thread safety if calling detect from multiple threads
+static bool ncnnInitialized = false;
+static bool modelLoaded = false;
+static bool useGPU = false; // Whether Vulkan will be used
+
+// YOLOv5 constants (adjust if using a different model)
+const int YOLOV5_INPUT_WIDTH = 640;
+const int YOLOV5_INPUT_HEIGHT = 640;
+const float NMS_THRESHOLD = 0.45f;
+const float CONFIDENCE_THRESHOLD = 0.25f;
+const int NUM_CLASSES = 80; // COCO dataset
+
+// Structure to hold detection results
+struct Object {
+    float x;      // Top-left corner x (relative to original image width)
+    float y;      // Top-left corner y (relative to original image height)
+    float w;      // Width (relative to original image width)
+    float h;      // Height (relative to original image height)
+    int label;    // Class index
+    float prob;   // Confidence score
+};
+
+// Helper function for Non-Maximum Suppression (NMS)
+static inline float intersection_area(const Object& a, const Object& b) {
+    float x1 = std::max(a.x, b.x);
+    float y1 = std::max(a.y, b.y);
+    float x2 = std::min(a.x + a.w, b.x + b.w);
+    float y2 = std::min(a.y + a.h, b.y + b.h);
+    float width = std::max(0.0f, x2 - x1);
+    float height = std::max(0.0f, y2 - y1);
+    return width * height;
+}
+
+static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<int>& picked, float nms_threshold) {
+    picked.clear();
+    const int n = objects.size();
+    if (n == 0) return;
+
+    std::vector<float> areas(n);
+    for (int i = 0; i < n; i++) {
+        areas[i] = objects[i].w * objects[i].h;
+    }
+
+    // Sort by probability (descending) - assumes input `objects` are already sorted if needed
+    // If not pre-sorted, you'd need to sort here based on `prob`.
+
+    for (int i = 0; i < n; i++) {
+        const Object& a = objects[i];
+        bool keep = true;
+        for (int j = 0; j < (int)picked.size(); j++) {
+            const Object& b = objects[picked[j]];
+
+            // Intersection over Union (IoU)
+            float inter_area = intersection_area(a, b);
+            float union_area = areas[i] + areas[picked[j]] - inter_area;
+            // float iou = inter_area / union_area; // Avoid division by zero if union_area is 0
+            if (union_area > 1e-6 && (inter_area / union_area) > nms_threshold) {
+                keep = false;
+                break; // Stop checking intersection with others for object 'a'
+            }
+        }
+        if (keep) {
+            picked.push_back(i);
+        }
+    }
+}
+
+// Custom YoloV5Focus layer implementation (if needed, check your .param file)
+// If your yolov5s.param does NOT contain a "YoloV5Focus" layer type, you can remove this.
+// Many newer YOLOv5 exports replace Focus with a standard Conv layer.
 class YoloV5Focus : public ncnn::Layer
 {
 public:
-    YoloV5Focus()
-    {
-        one_blob_only = true;
-    }
-
-    virtual int forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, const ncnn::Option& opt) const
-    {
+    YoloV5Focus() { one_blob_only = true; }
+    virtual int forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob, const ncnn::Option& opt) const {
         int w = bottom_blob.w;
         int h = bottom_blob.h;
         int channels = bottom_blob.c;
-
         int outw = w / 2;
         int outh = h / 2;
         int outc = channels * 4;
-
         top_blob.create(outw, outh, outc, 4u, 1, opt.blob_allocator);
-        if (top_blob.empty())
-            return -100;
-
+        if (top_blob.empty()) return -100;
         #pragma omp parallel for num_threads(opt.num_threads)
-        for (int p = 0; p < outc; p++)
-        {
+        for (int p = 0; p < outc; p++) {
             const float* ptr = bottom_blob.channel(p % channels).row((p / channels) % 2) + ((p / channels) / 2);
             float* outptr = top_blob.channel(p);
-
-            for (int i = 0; i < outh; i++)
-            {
-                for (int j = 0; j < outw; j++)
-                {
+            for (int i = 0; i < outh; i++) {
+                for (int j = 0; j < outw; j++) {
                     *outptr = *ptr;
                     outptr += 1;
                     ptr += 2;
                 }
-                ptr += w;
+                ptr += w; // Move to the next row in the input blob (stride is w)
             }
         }
-
         return 0;
     }
 };
+DEFINE_LAYER_CREATOR(YoloV5Focus) // Macro to register the layer creator
 
-DEFINE_LAYER_CREATOR(YoloV5Focus)
+extern "C" {
 
-struct Object
-{
-    float x;
-    float y;
-    float w;
-    float h;
-    int label;
-    float prob;
-};
-
-static inline float intersection_area(const Object& a, const Object& b)
-{
-    float x1 = std::max(a.x - a.w/2, b.x - b.w/2);
-    float y1 = std::max(a.y - a.h/2, b.y - b.h/2);
-    float x2 = std::min(a.x + a.w/2, b.x + b.w/2);
-    float y2 = std::min(a.y + a.h/2, b.y + b.h/2);
-    
-    float area = (x2 - x1) * (y2 - y1);
-    return area > 0 ? area : 0;
-}
-
-static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<int>& picked, float nms_threshold)
-{
-    picked.clear();
-
-    const int n = objects.size();
-
-    std::vector<float> areas(n);
-    for (int i = 0; i < n; i++)
-    {
-        areas[i] = objects[i].w * objects[i].h;
-    }
-
-    for (int i = 0; i < n; i++)
-    {
-        const Object& a = objects[i];
-
-        int keep = 1;
-        for (int j = 0; j < (int)picked.size(); j++)
-        {
-            const Object& b = objects[picked[j]];
-
-            float inter_area = intersection_area(a, b);
-            float union_area = areas[i] + areas[picked[j]] - inter_area;
-            if (inter_area / union_area > nms_threshold)
-                keep = 0;
-        }
-
-        if (keep)
-            picked.push_back(i);
-    }
-}
-
-extern "C"
+// JNI Function: Initialize NCNN environment
 JNIEXPORT jboolean JNICALL
-Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv* env, jobject /* this */, jobject assetManager) {
-    LOGI("Native init called");
-    
-    // Convert Java AssetManager to native AAssetManager
-    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
-    if (!mgr) {
-        LOGE("Failed to get AAssetManager");
+Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv *env, jobject /* this */, jobject assetManager) {
+    if (ncnnInitialized) {
+        LOGI("NCNN already initialized.");
+        return JNI_TRUE;
+    }
+    LOGI("Initializing NCNN...");
+
+    // Get AAssetManager
+    AAssetManager *mgr = AAssetManager_fromJava(env, assetManager);
+    if (mgr == nullptr) {
+        LOGE("Failed to get AAssetManager from Java");
         return JNI_FALSE;
     }
-    
-    // Initialize Vulkan with proper error handling
-    try {
-        // Initialize NCNN GPU instance
+
+    // Check Vulkan support
+    int gpu_count = ncnn::get_gpu_count();
+    if (gpu_count > 0) {
+        useGPU = true;
+        LOGI("Vulkan GPU detected. Count: %d", gpu_count);
+        // Initialize Vulkan instance. This is crucial.
         ncnn::create_gpu_instance();
-        
-        // Check if any GPU devices available
-        hasGPU = ncnn::get_gpu_count() > 0;
-        LOGI("Vulkan detection: %d GPU devices found", ncnn::get_gpu_count());
-    } catch (const std::exception& e) {
-        LOGE("Failed to initialize Vulkan: %s", e.what());
-        hasGPU = false;
-    } catch (...) {
-        LOGE("Unknown error when initializing Vulkan");
-        hasGPU = false;
-    }
-    
-    LOGI("Vulkan support: %s", hasGPU ? "available" : "unavailable");
-    
-    // Configure NCNN options
-    yoloNet.opt.num_threads = 4;  // CPU threads for non-Vulkan operations
-    yoloNet.opt.lightmode = true; // Enable light mode for faster inference
-    
-    // Use Vulkan if available
-    if (hasGPU) {
-        yoloNet.opt.use_vulkan_compute = true;
-        LOGI("Vulkan enabled for inference");
     } else {
-        yoloNet.opt.use_vulkan_compute = false;
-        LOGI("Vulkan not available, using CPU for inference");
+        useGPU = false;
+        LOGI("No Vulkan GPU detected. Using CPU.");
     }
-    
-    // Register custom layers
-    yoloNet.register_custom_layer("YoloV5Focus", YoloV5Focus_layer_creator);
-    
+
+    // Configure NCNN Net options
+    yoloNet.opt.lightmode = true; // Use lightweight mode
+    yoloNet.opt.num_threads = 4;  // Adjust based on device core count
+    yoloNet.opt.use_packing_layout = true; // Recommended for performance
+    yoloNet.opt.use_fp16_packed = true;    // Use FP16 storage for reduced memory
+    yoloNet.opt.use_fp16_arithmetic = true;// Use FP16 arithmetic if supported (check device capabilities)
+    yoloNet.opt.use_vulkan_compute = useGPU; // Enable Vulkan if available
+
+    // Register custom layers IF NEEDED (check your .param file)
+    // If your model uses custom layers like YoloV5Focus, register them.
+    // If not, you can comment this out.
+    int ret = yoloNet.register_custom_layer("YoloV5Focus", YoloV5Focus_layer_creator);
+    if (ret != 0) {
+//        LOGW("Failed to register custom layer YoloV5Focus (maybe not needed?). Error code: %d", ret);
+        // Continue even if registration fails, maybe the model doesn't use it.
+    } else {
+        LOGI("Custom layer YoloV5Focus registered.");
+    }
+
+
+    ncnnInitialized = true;
+    LOGI("NCNN initialization complete. Vulkan enabled: %s", useGPU ? "true" : "false");
     return JNI_TRUE;
 }
 
-extern "C"
+// JNI Function: Load the YOLO model
 JNIEXPORT jboolean JNICALL
-Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_loadModel(JNIEnv* env, jobject /* this */, jobject assetManager) {
-    AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
-    if (!mgr) {
-        LOGE("Failed to get AAssetManager");
+Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_loadModel(JNIEnv *env, jobject /* this */, jobject assetManager) {
+    if (!ncnnInitialized) {
+        LOGE("NCNN not initialized before loading model.");
+        return JNI_FALSE;
+    }
+    if (modelLoaded) {
+        LOGI("Model already loaded.");
+        return JNI_TRUE;
+    }
+    LOGI("Loading YOLO model...");
+
+    // Get AAssetManager
+    AAssetManager *mgr = AAssetManager_fromJava(env, assetManager);
+    if (mgr == nullptr) {
+        LOGE("Failed to get AAssetManager from Java for model loading");
         return JNI_FALSE;
     }
 
-    // Loading the YOLO model
-    yoloNet.clear();
-    int ret1 = yoloNet.load_param(mgr, "yolov5s.param");
-    int ret2 = yoloNet.load_model(mgr, "yolov5s.bin");
-    
-    modelLoaded = (ret1 == 0 && ret2 == 0);
-    
-    if (modelLoaded) {
-        LOGI("YOLOv5 model loaded successfully");
-    } else {
-        LOGE("Failed to load YOLOv5 model: param=%d, bin=%d", ret1, ret2);
+    // Load model parameters and binary weights from assets
+    // Ensure these filenames match exactly what's in your app/src/main/assets folder
+    const char *param_path = "yolov5s.param";
+    const char *bin_path = "yolov5s.bin";
+
+    int ret_param = yoloNet.load_param(mgr, param_path);
+    if (ret_param != 0) {
+        LOGE("Failed to load model param: %s (Error code: %d)", param_path, ret_param);
+        return JNI_FALSE;
     }
-    
-    return modelLoaded ? JNI_TRUE : JNI_FALSE;
+    LOGI("Loaded model param: %s", param_path);
+
+    int ret_bin = yoloNet.load_model(mgr, bin_path);
+    if (ret_bin != 0) {
+        LOGE("Failed to load model bin: %s (Error code: %d)", bin_path, ret_bin);
+        // Clear the net if bin loading fails after param loading succeeded
+        yoloNet.clear();
+        return JNI_FALSE;
+    }
+    LOGI("Loaded model bin: %s", bin_path);
+
+    modelLoaded = true;
+    LOGI("YOLO model loading complete.");
+    return JNI_TRUE;
 }
 
-extern "C"
+// JNI Function: Check if Vulkan (GPU) is being used
 JNIEXPORT jboolean JNICALL
-Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_hasVulkan(JNIEnv* env, jobject /* this */) {
-    return hasGPU ? JNI_TRUE : JNI_FALSE;
+Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_hasVulkan(JNIEnv *env, jobject /* this */) {
+    return useGPU ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C"
+// JNI Function: Perform object detection
 JNIEXPORT jfloatArray JNICALL
-Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detect(JNIEnv* env, jobject /* this */, 
-                                                        jbyteArray imageBytes, jint width, jint height) {
-    if (!modelLoaded) {
-        LOGE("Model not loaded");
+Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detect(JNIEnv *env, jobject /* this */,
+                                                        jbyteArray imageBytes, jint imageWidth, jint imageHeight) {
+    if (!ncnnInitialized || !modelLoaded) {
+        LOGE("Detection failed: NCNN not initialized or model not loaded.");
+        return nullptr; // Return null to indicate failure
+    }
+
+    // 1. Get image data from Java byte array (assuming RGBA format)
+    jbyte *image_data = env->GetByteArrayElements(imageBytes, nullptr);
+    if (image_data == nullptr) {
+        LOGE("Failed to get image byte array elements.");
         return nullptr;
     }
-    
-    // Lock to ensure thread safety
-    ncnn::MutexLockGuard g(lock);
-    
-    // Get image data from Java
-    jbyte* data = env->GetByteArrayElements(imageBytes, nullptr);
-    if (!data) {
-        LOGE("Failed to get image data");
-        return nullptr;
-    }
-    
-    // Convert RGBA to RGB
-    ncnn::Mat in = ncnn::Mat(width, height, 3);
-    const unsigned char* rgba = reinterpret_cast<const unsigned char*>(data);
-    
-    #pragma omp parallel for num_threads(4)
-    for (int y = 0; y < height; y++) {
-        const unsigned char* rgba_row = rgba + y * width * 4;
-        unsigned char* rgb_row = in.row<unsigned char>(y);
-        
-        for (int x = 0; x < width; x++) {
-            rgb_row[0] = rgba_row[0]; // R
-            rgb_row[1] = rgba_row[1]; // G
-            rgb_row[2] = rgba_row[2]; // B
-            
-            rgba_row += 4;
-            rgb_row += 3;
+    // Wrap data in ncnn::Mat. The 4 is for RGBA channels.
+    // We create it directly from the RGBA data.
+    ncnn::Mat img_rgba = ncnn::Mat(imageWidth, imageHeight, (void*)image_data, (size_t)4, 4);
+
+    // 2. Preprocessing
+    // Convert RGBA to RGB (NCNN typically expects BGR or RGB)
+    ncnn::Mat img_rgb;
+//    ncnn::cvtColor(img_rgba, img_rgb, ncnn::COLOR_RGBA2RGB);
+
+    // Calculate scaling factor and padding for letterboxing
+    float scale_w = (float)YOLOV5_INPUT_WIDTH / imageWidth;
+    float scale_h = (float)YOLOV5_INPUT_HEIGHT / imageHeight;
+    float scale = std::min(scale_w, scale_h); // Use the smaller scale factor to fit inside
+
+    int scaled_w = static_cast<int>(imageWidth * scale);
+    int scaled_h = static_cast<int>(imageHeight * scale);
+
+    // Resize the image
+    ncnn::Mat resized_img;
+    ncnn::resize_bilinear(img_rgb, resized_img, scaled_w, scaled_h);
+
+    // Create padded image (letterbox)
+    ncnn::Mat input_img;
+    // Calculate padding offsets
+    int top_pad = (YOLOV5_INPUT_HEIGHT - scaled_h) / 2;
+    int bottom_pad = YOLOV5_INPUT_HEIGHT - scaled_h - top_pad;
+    int left_pad = (YOLOV5_INPUT_WIDTH - scaled_w) / 2;
+    int right_pad = YOLOV5_INPUT_WIDTH - scaled_w - left_pad;
+
+    // Apply padding (value 114 is common for YOLO, representing gray)
+    ncnn::copy_make_border(resized_img, input_img, top_pad, bottom_pad, left_pad, right_pad, ncnn::BORDER_CONSTANT, 114.f);
+
+    // Normalize the image (0-255 -> 0-1)
+    // NCNN handles mean/norm internally if specified in the .param file,
+    // but manual normalization is often done for YOLO models.
+    // Check your model's requirements. This assumes normalization to [0, 1].
+    const float norm_vals[3] = {1 / 255.f, 1 / 255.f, 1 / 255.f};
+    const float mean_vals[3] = {0.f, 0.f, 0.f}; // No mean subtraction if normalizing to [0, 1]
+    input_img.substract_mean_normalize(mean_vals, norm_vals);
+
+    // Release the Java byte array *after* converting to ncnn::Mat
+    env->ReleaseByteArrayElements(imageBytes, image_data, JNI_ABORT); // Use JNI_ABORT if no changes were made
+
+    // 3. NCNN Inference
+    std::vector<Object> proposals; // Store raw detections before NMS
+    { // Scope for extractor and mutex lock
+        ncnn::MutexLockGuard guard(yoloNetLock); // Lock for thread safety
+        ncnn::Extractor ex = yoloNet.create_extractor();
+        // Set extractor options if needed (e.g., ex.set_num_threads(2)); inherits from net by default
+        ex.set_vulkan_compute(useGPU);
+
+        // Input tensor name "images" is common for YOLOv5 ONNX exports
+        ex.input("images", input_img);
+
+        // Output tensor name "output" is also common
+        ncnn::Mat out;
+        ex.extract("output", out); // Or the actual output node name from your .param file
+
+        // 4. Postprocessing
+        // out shape is typically [1, num_predictions, 5 + num_classes]
+        // num_predictions = 25200 for 640x640 input (80x80 + 40x40 + 20x20 anchors * 3 scales)
+        // Format: [cx, cy, w, h, box_confidence, class1_prob, class2_prob, ...]
+        int num_predictions = out.h; // Should be 25200
+        int num_outputs = out.w;     // Should be 85 (5 + 80 classes)
+
+        if (num_outputs != 5 + NUM_CLASSES) {
+             LOGE("Output tensor width (%d) does not match expected size (5 + %d classes)", num_outputs, NUM_CLASSES);
+             return nullptr;
         }
-    }
-    
-    // Release byte array
-    env->ReleaseByteArrayElements(imageBytes, data, JNI_ABORT);
-    
-    // YOLOv5 prefers 640x640 input
-    const int target_size = 640;
-    
-    int img_w = width;
-    int img_h = height;
-    
-    // Scale to maintain aspect ratio
-    float scale = 1.0f;
-    if (img_w > img_h) {
-        scale = (float)target_size / img_w;
-    } else {
-        scale = (float)target_size / img_h;
-    }
-    
-    int scaled_w = int(img_w * scale);
-    int scaled_h = int(img_h * scale);
-    
-    // Resize
-    ncnn::Mat in_resized;
-    ncnn::resize_bilinear(in, in_resized, scaled_w, scaled_h);
-    
-    // Pad to square
-    ncnn::Mat in_pad(target_size, target_size, 3);
-    in_pad.fill(114.0f); // Gray padding
-    
-    int dx = (target_size - scaled_w) / 2;
-    int dy = (target_size - scaled_h) / 2;
-    
-    // Copy the resized image to the center of the padded image
-    for (int y = 0; y < scaled_h; y++) {
-        const float* src_row = in_resized.row(y);
-        float* dst_row = in_pad.row(y + dy) + dx * 3;
-        memcpy(dst_row, src_row, scaled_w * 3 * sizeof(float));
-    }
-    
-    // Normalize
-    const float mean_vals[3] = {0, 0, 0};
-    const float norm_vals[3] = {1/255.0f, 1/255.0f, 1/255.0f};
-    in_pad.substract_mean_normalize(mean_vals, norm_vals);
-    
-    // Create extractor from the model
-    ncnn::Extractor ex = yoloNet.create_extractor();
-    
-    // Set input
-    ex.input("images", in_pad);
-    
-    // Get output
-    ncnn::Mat out;
-    ex.extract("output", out);
-    
-    // Parse YOLOv5 detection output
-    std::vector<Object> objects;
-    
-    // The output is a 25200 x 85 (80 classes + 5) matrix
-    // (25200 = 3 * (80*80 + 40*40 + 20*20)) anchors
-    // For each row: [x, y, w, h, confidence, 80 class probabilities]
-    
-    for (int i = 0; i < out.h; i++) {
-        const float* values = out.row(i);
-        
-        float obj_conf = values[4];
-        if (obj_conf < 0.25) { // Confidence threshold
-            continue;
-        }
-        
-        // Find the class with the highest probability
-        float max_prob = 0.0f;
-        int max_class = 0;
-        for (int j = 0; j < 80; j++) {
-            float class_prob = values[5 + j];
-            if (class_prob > max_prob) {
-                max_prob = class_prob;
-                max_class = j;
+
+        for (int i = 0; i < num_predictions; i++) {
+            const float* row = out.row(i);
+            float box_confidence = row[4];
+
+            if (box_confidence >= CONFIDENCE_THRESHOLD) {
+                // Find the class with the highest score
+                int best_class_idx = 0;
+                float max_class_prob = 0.0f;
+                for (int j = 0; j < NUM_CLASSES; j++) {
+                    float class_prob = row[5 + j];
+                    if (class_prob > max_class_prob) {
+                        max_class_prob = class_prob;
+                        best_class_idx = j;
+                    }
+                }
+
+                float final_confidence = box_confidence * max_class_prob;
+
+                if (final_confidence >= CONFIDENCE_THRESHOLD) {
+                    // Decode bounding box coordinates (center_x, center_y, width, height)
+                    // These are relative to the 640x640 input image
+                    float cx = row[0];
+                    float cy = row[1];
+                    float w = row[2];
+                    float h = row[3];
+
+                    // Convert from center format to top-left format and scale back to original image dimensions
+                    float x1 = (cx - w / 2.0f - left_pad) / scale;
+                    float y1 = (cy - h / 2.0f - top_pad) / scale;
+                    float x2 = (cx + w / 2.0f - left_pad) / scale;
+                    float y2 = (cy + h / 2.0f - top_pad) / scale;
+
+                    // Clamp coordinates to image bounds
+                    x1 = std::max(0.0f, std::min((float)imageWidth, x1));
+                    y1 = std::max(0.0f, std::min((float)imageHeight, y1));
+                    x2 = std::max(0.0f, std::min((float)imageWidth, x2));
+                    y2 = std::max(0.0f, std::min((float)imageHeight, y2));
+
+                    Object obj;
+                    obj.x = x1; // Top-left x
+                    obj.y = y1; // Top-left y
+                    obj.w = x2 - x1; // Width
+                    obj.h = y2 - y1; // Height
+                    obj.label = best_class_idx;
+                    obj.prob = final_confidence;
+                    proposals.push_back(obj);
+                }
             }
         }
-        
-        // Final confidence
-        float confidence = obj_conf * max_prob;
-        if (confidence < 0.25) { // Confidence threshold
-            continue;
-        }
-        
-        Object obj;
-        obj.label = max_class;
-        obj.prob = confidence;
-        
-        // The x,y,w,h are relative to the 640x640 input
-        obj.x = values[0] / target_size;
-        obj.y = values[1] / target_size;
-        obj.w = values[2] / target_size;
-        obj.h = values[3] / target_size;
-        
-        objects.push_back(obj);
-    }
-    
-    // Apply NMS (Non-maximum suppression)
-    std::vector<int> picked;
-    nms_sorted_bboxes(objects, picked, 0.45f); // 0.45 is the NMS threshold
-    
-    // Format results for Java
-    std::vector<Object> results;
-    for (int i : picked) {
-        results.push_back(objects[i]);
-    }
-    
-    // Create float array: [count, x, y, w, h, label, confidence, ...]
-    int result_count = results.size();
-    int float_array_size = 1 + result_count * 6; // 1 for count + 6 values per detection
-    
-    jfloatArray result = env->NewFloatArray(float_array_size);
-    if (result == nullptr) {
-        LOGE("Failed to create float array");
+    } // End scope for extractor and mutex lock
+
+    // Apply Non-Maximum Suppression (NMS)
+    std::vector<int> picked_indices;
+    // Sort proposals by confidence before NMS (important!)
+    std::sort(proposals.begin(), proposals.end(), [](const Object& a, const Object& b) {
+        return a.prob > b.prob;
+    });
+    nms_sorted_bboxes(proposals, picked_indices, NMS_THRESHOLD);
+
+    // 5. Format results for Java
+    // Format: [count, x1, y1, w1, h1, label1, conf1, x2, y2, w2, h2, label2, conf2, ...]
+    int final_count = picked_indices.size();
+    int result_size = 1 + final_count * 6; // 1 for count, 6 floats per detection
+    jfloatArray resultArray = env->NewFloatArray(result_size);
+    if (resultArray == nullptr) {
+        LOGE("Failed to allocate float array for results.");
         return nullptr;
     }
-    
-    std::vector<float> resultData(float_array_size);
-    resultData[0] = (float)result_count;
-    
-    for (int i = 0; i < result_count; i++) {
-        const Object& obj = results[i];
+
+    std::vector<float> resultData(result_size);
+    resultData[0] = (float)final_count;
+
+    for (int i = 0; i < final_count; ++i) {
+        const Object& obj = proposals[picked_indices[i]];
         int offset = 1 + i * 6;
         resultData[offset + 0] = obj.x;
         resultData[offset + 1] = obj.y;
@@ -364,21 +396,33 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detect(JNIEnv* env, jobject /* 
         resultData[offset + 4] = (float)obj.label;
         resultData[offset + 5] = obj.prob;
     }
-    
-    env->SetFloatArrayRegion(result, 0, float_array_size, resultData.data());
-    
-    return result;
+
+    // Copy data to the Java float array
+    env->SetFloatArrayRegion(resultArray, 0, result_size, resultData.data());
+
+    return resultArray;
 }
 
-extern "C"
+
+// JNI Function: Release NCNN resources
 JNIEXPORT void JNICALL
-Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_releaseNative(JNIEnv* env, jobject /* this */) {
-    // Clean up NCNN resources
-    yoloNet.clear();
+Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_releaseNative(JNIEnv *env, jobject /* this */) {
+    LOGI("Releasing NCNN resources...");
+    {
+        ncnn::MutexLockGuard guard(yoloNetLock); // Ensure thread safety during cleanup
+        yoloNet.clear(); // Clear the network (releases model data)
+    }
+
+    // Destroy the Vulkan instance if it was created
+    if (useGPU) {
+        ncnn::destroy_gpu_instance();
+        LOGI("Vulkan GPU instance destroyed.");
+    }
+
+    ncnnInitialized = false;
     modelLoaded = false;
-    
-    // Release Vulkan instance
-    ncnn::destroy_gpu_instance();
-    
-    LOGI("Resources released");
+    useGPU = false;
+    LOGI("NCNN resources released.");
 }
+
+} // extern "C"
