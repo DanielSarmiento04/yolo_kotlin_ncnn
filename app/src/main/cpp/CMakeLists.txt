@@ -1,18 +1,15 @@
-cmake_minimum_required(VERSION 3.10.2) # Consider using a newer version like 3.18+ if available/needed
+cmake_minimum_required(VERSION 3.18) # Use a more modern version for better features
 project("yolo_kotlin_ncnn")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# Enable C++ exceptions needed by NCNN and potentially the stub
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
-# Disable RTTI if not needed (common for NCNN)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
-# Set default visibility to public for exported symbols
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=default")
 
+# Set common CXX flags (apply to all targets unless overridden)
+# Revert to default visibility, rely on explicit attributes in stub if needed
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -fno-rtti -fvisibility=default")
 
-# Enable Vulkan support
+# Enable Vulkan support definition for ncnn
 add_definitions(-DNCNN_VULKAN=1)
 
 # Enable OpenMP
@@ -20,27 +17,31 @@ find_package(OpenMP REQUIRED)
 # Add OpenMP flags (needed for both compile and link)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-# Note: target_link_libraries(OpenMP::OpenMP_CXX) handles linker flags later
-
 
 # Set include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ncnn_include # Correctly points to app/src/main/cpp/ncnn_include
 )
 
 # Build the glslang stub as a STATIC library
 add_library(glslang_stub STATIC
     glslang_stub.cpp
+    glslang_stub.h # Include header for dependency tracking
 )
-# No need for target_compile_options for visibility/rtti/exceptions if set globally via CMAKE_CXX_FLAGS
+# No need for target_compile_options if flags are set globally
 
 # Find the Vulkan library
-find_library(vulkan-lib vulkan)
+find_library(vulkan-lib vulkan HINTS ${ANDROID_NDK}/sources/third_party/vulkan/src/build/cmake/build/libs/${ANDROID_ABI})
 if(NOT vulkan-lib)
-    message(FATAL_ERROR "Vulkan library not found. Check NDK setup and API level (min 24).")
+    # Fallback to system library path if not found in NDK structure (less common now)
+    find_library(vulkan-lib vulkan)
 endif()
-message(STATUS "Found Vulkan library: ${vulkan-lib}")
+if(NOT vulkan-lib)
+    message(FATAL_ERROR "Vulkan library not found. Check NDK setup and ensure target API level >= 24.")
+else()
+    message(STATUS "Found Vulkan library: ${vulkan-lib}")
+endif()
 
 # Find required Android libraries
 find_library(log-lib log)
@@ -49,7 +50,8 @@ find_library(jnigraphics-lib jnigraphics)
 
 # Import NCNN library (ensure path is correct)
 add_library(ncnn STATIC IMPORTED GLOBAL)
-set(NCNN_LIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a") # Use variable for clarity
+# This path correctly resolves based on CMAKE_CURRENT_SOURCE_DIR and ANDROID_ABI
+set(NCNN_LIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/${ANDROID_ABI}/libncnn.a")
 if(NOT EXISTS ${NCNN_LIB_PATH})
     message(FATAL_ERROR "NCNN library not found at ${NCNN_LIB_PATH}")
 endif()
@@ -60,21 +62,20 @@ message(STATUS "Importing NCNN library from: ${NCNN_LIB_PATH}")
 add_library(native-lib SHARED
     native-lib.cpp
 )
-# No need for target_compile_options for visibility/rtti/exceptions if set globally
+
+# JNI functions in native-lib.cpp should use JNIEXPORT which handles visibility
 
 # Link libraries to native-lib
 target_link_libraries(native-lib
-    PRIVATE # Use PRIVATE unless these libs are needed by targets linking native-lib
+    PRIVATE # Use PRIVATE as these are implementation details
     # Link NCNN *before* the stub
     ncnn
 
     # Link glslang_stub static library using whole-archive to ensure symbols are pulled
-    # Note: CMake doesn't have direct whole-archive support, use linker flags
-    # The exact flags might differ slightly based on the linker (lld vs ld)
     # For lld (default in modern NDKs):
-    -Wl,--whole-archive # Start whole archive section
-    glslang_stub        # Link the stub library
-    -Wl,--no-whole-archive # End whole archive section
+    -Wl,--whole-archive
+    glslang_stub
+    -Wl,--no-whole-archive
 
     # Link OpenMP
     OpenMP::OpenMP_CXX
@@ -84,9 +85,6 @@ target_link_libraries(native-lib
     ${android-lib}
     ${jnigraphics-lib}
     ${vulkan-lib}
-
-    # Link C++ Standard Library (shared version)
-    c++_shared
 
     # Link atomic and math libraries (often needed by NCNN or dependencies)
     atomic
