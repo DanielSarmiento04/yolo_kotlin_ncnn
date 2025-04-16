@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.yolo_kotlin_ncnn"
-        minSdk = 24
+        minSdk = 26 // Changed from 24 to 26 to support adaptive icons
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
