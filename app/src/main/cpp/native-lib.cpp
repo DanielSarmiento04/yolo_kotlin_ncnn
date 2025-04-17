@@ -246,21 +246,23 @@ Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detect(JNIEnv *env, jobject /* 
     { // Scope for extractor and mutex lock
         ncnn::MutexLockGuard guard(yoloNetLock); // Lock for thread safety
         ncnn::Extractor ex = yoloNet.create_extractor();
-        ex.set_vulkan_compute(useGPU);
 
         // *** VERIFY THIS INPUT TENSOR NAME MATCHES YOUR MODEL ***
-        int input_ret = ex.input("images", input_img); // Default is often "images" or "input"
+        // Changed from "images" based on NCNN error log suggestion
+        const char* input_name = "in0"; // TRY THIS NAME FIRST! Or replace with the actual name from your model.
+        int input_ret = ex.input(input_name, input_img);
         if (input_ret != 0) {
-             LOGE("Failed to set input tensor 'images'. Error code: %d", input_ret);
+             LOGE("Failed to set input tensor '%s'. Error code: %d. Check .param file for correct input name.", input_name, input_ret);
              return nullptr;
         }
 
         ncnn::Mat out;
         // *** VERIFY THIS OUTPUT TENSOR NAME MATCHES YOUR MODEL ***
         // Common names: "output", "output0", "det_out"
-        int extract_ret = ex.extract("output", out);
+        const char* output_name = "output"; // Keep "output" unless you know it's different
+        int extract_ret = ex.extract(output_name, out);
         if (extract_ret != 0) {
-            LOGE("Failed to extract output tensor 'output'. Error code: %d", extract_ret);
+            LOGE("Failed to extract output tensor '%s'. Error code: %d. Check .param file for correct output name.", output_name, extract_ret);
             return nullptr;
         }
         // Log output tensor dimensions for debugging
