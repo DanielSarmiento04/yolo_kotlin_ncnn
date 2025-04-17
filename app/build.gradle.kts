@@ -93,4 +93,16 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+
+    // CameraX dependencies
+    val cameraxVersion = "1.3.4" // Use the latest stable version
+    implementation("androidx.camera:camera-core:${cameraxVersion}")
+    implementation("androidx.camera:camera-camera2:${cameraxVersion}")
+    implementation("androidx.camera:camera-lifecycle:${cameraxVersion}")
+    implementation("androidx.camera:camera-view:${cameraxVersion}")
+    implementation("androidx.camera:camera-extensions:${cameraxVersion}") // Optional for extensions like HDR, Night mode
+
+    // For YUV -> Bitmap conversion (optional, can implement manually)
+    // implementation("com.google.android.renderscript:renderscript-toolkit:1.0.0") // Example using Renderscript (deprecated but functional)
+    // Or use a library like androidx.renderscript if minSdk allows, or implement manually
 }

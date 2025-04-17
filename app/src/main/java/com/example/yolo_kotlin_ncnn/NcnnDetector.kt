@@ -22,7 +22,7 @@ class NcnnDetector(private val context: Context) {
         // Load the native library compiled by CMake
         init {
             try {
-                System.loadLibrary("native-lib")
+                System.loadLibrary("native-lib") // Ensure this matches your CMakeLists.txt target name
                 Log.i(TAG, "Successfully loaded native-lib")
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "Failed to load native-lib", e)
@@ -50,6 +50,7 @@ class NcnnDetector(private val context: Context) {
 
         // Pass the application's asset manager to native code
         isInitialized = try {
+            // Pass context.assets which is the AssetManager
             initNative(context.assets)
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Native init method not found", e)
@@ -74,6 +75,7 @@ class NcnnDetector(private val context: Context) {
         if (isModelLoaded) return true
 
         isModelLoaded = try {
+            // Pass context.assets which is the AssetManager
             loadModel(context.assets)
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Native loadModel method not found", e)
@@ -110,12 +112,11 @@ class NcnnDetector(private val context: Context) {
         }
 
         // 2. Convert Bitmap to RGBA byte array
-        // NCNN native code expects RGBA, so we extract it directly.
+        // NCNN native code expects RGBA (as implemented in native-lib.cpp).
         val bytes = ByteArray(argbBitmap.byteCount)
         val buffer = ByteBuffer.wrap(bytes)
         argbBitmap.copyPixelsToBuffer(buffer)
-        // Note: If your native code expects a different format (like BGR), adjust conversion here or in C++.
-        // This implementation assumes native code handles RGBA -> RGB conversion.
+        // The buffer now contains RGBA data if the bitmap was ARGB_8888.
 
         // 3. Call native detect function
         val startTime = System.currentTimeMillis()
@@ -134,14 +135,23 @@ class NcnnDetector(private val context: Context) {
 
         // 4. Parse results
         if (rawResult == null || rawResult.isEmpty()) {
-            Log.w(TAG, "Detection returned null or empty result.")
+            // Log only if null, empty array with count 0 is valid (no detections)
+            if (rawResult == null) Log.w(TAG, "Detection returned null result.")
+            else Log.i(TAG, "Detection returned empty or invalid array.") // Log if empty array received
             return emptyList()
         }
 
+        // *** ADDED LOGGING ***
+        Log.d(TAG, "Raw result array (first 10 elements): ${rawResult.take(10).joinToString()}")
+        // *** END ADDED LOGGING ***
+
         // Format: [count, x1, y1, w1, h1, label1, conf1, x2, y2, w2, h2, label2, conf2, ...]
         val count = rawResult[0].toInt()
+        // *** ADDED LOGGING ***
+        Log.d(TAG, "Parsed detection count from native: $count")
+        // *** END ADDED LOGGING ***
         if (count <= 0) {
-            // Log.i(TAG, "No objects detected.") // Less verbose logging
+            // Log.i(TAG, "No objects detected.") // Less verbose logging for no detections
             return emptyList()
         }
 
@@ -163,13 +173,24 @@ class NcnnDetector(private val context: Context) {
             val label = rawResult[offset + 4].toInt()
             val confidence = rawResult[offset + 5]
 
+            // Apply confidence threshold here (optional, can also be done in native code)
             if (confidence >= confidenceThreshold) {
                 // Create RectF from top-left coordinates and width/height
-                val rect = RectF(x, y, x + w, y + h)
-                detections.add(Detection(rect, label, confidence))
+                // Ensure coordinates are valid before creating RectF
+                 if (x >= 0 && y >= 0 && w > 0 && h > 0) {
+                    val rect = RectF(x, y, x + w, y + h)
+                    detections.add(Detection(rect, label, confidence))
+                 } else {
+                    Log.w(TAG, "Skipping detection with invalid coordinates: x=$x, y=$y, w=$w, h=$h")
+                 }
             }
         }
-        Log.i(TAG, "Detected ${detections.size} objects (after thresholding).")
+        if (detections.isNotEmpty()) {
+            Log.i(TAG, "Detected ${detections.size} objects (after thresholding).")
+        } else if (count > 0) {
+             // Log if native reported count > 0 but Kotlin list is empty (due to thresholding or invalid data)
+             Log.i(TAG, "Detected 0 objects after Kotlin thresholding/validation (native count was $count).")
+        }
         return detections
     }
 
