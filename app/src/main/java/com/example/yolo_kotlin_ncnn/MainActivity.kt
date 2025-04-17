@@ -61,12 +61,20 @@ class MainActivity : ComponentActivity() {
 
         // Initialize detector asynchronously
         lifecycleScope.launch(Dispatchers.IO) {
+            Log.i(TAG, "Starting detector initialization...") // Log start
             val initOk = detector.init()
             if (initOk) {
+                Log.i(TAG, "Detector init successful. Loading model...") // Log init success
                 val modelOk = detector.loadModel()
                 if (modelOk) {
+                    // *** ADDED LOGGING ***
+                    Log.i(TAG, "Model load successful. Setting isDetectorReady = true")
+                    // *** END ADDED LOGGING ***
                     isDetectorReady.value = true
-                    Log.i(TAG, "Detector initialized and model loaded successfully.")
+                    // *** ADDED LOGGING ***
+                    Log.i(TAG, "isDetectorReady state is now: ${isDetectorReady.value}")
+                    // *** END ADDED LOGGING ***
+                    Log.i(TAG, "Detector initialized and model loaded successfully.") // Keep original log
                 } else {
                     Log.e(TAG, "Failed to load model.")
                 }
@@ -119,6 +127,11 @@ fun CameraScreen(
     cameraExecutor: ExecutorService,
     isDetectorReady: Boolean
 ) {
+    // *** ADDED LOGGING ***
+    // Log the value of isDetectorReady received by this composable instance
+    Log.d("CameraScreen", "Composable recomposed/launched. isDetectorReady = $isDetectorReady")
+    // *** END ADDED LOGGING ***
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
@@ -134,56 +147,73 @@ fun CameraScreen(
     val previewView = remember { PreviewView(context) }
     val preview = remember { Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) } }
 
-    val imageAnalyzer = remember {
+    // *** Make imageAnalyzer depend on isDetectorReady ***
+    val imageAnalyzer = remember(isDetectorReady) { // Add isDetectorReady as a key
+        Log.d("CameraScreen", "Creating/Recreating ImageAnalysis (isDetectorReady=$isDetectorReady)") // Log recreation
         ImageAnalysis.Builder()
             .setTargetResolution(Size(640, 640)) // Match model input if possible, adjust as needed
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .apply {
-                setAnalyzer(cameraExecutor) { imageProxy ->
-                    if (!isDetectorReady) {
-                        imageProxy.close()
-                        return@setAnalyzer
+                // Set the analyzer only if the detector is ready when this block executes
+                if (isDetectorReady) {
+                    Log.d("CameraScreen", "Setting Analyzer because isDetectorReady is true")
+                    setAnalyzer(cameraExecutor) { imageProxy ->
+                        // FPS calculation
+                        val currentFrameCount = frameCount.incrementAndGet()
+                        val currentTime = System.currentTimeMillis()
+                        val elapsedTime = currentTime - lastFpsTimestamp
+                        if (elapsedTime >= 1000) { // Update FPS every second
+                            fps = (currentFrameCount * 1000f) / elapsedTime
+                            frameCount.set(0) // Reset frame count
+                            lastFpsTimestamp = currentTime
+                            // *** ADDED LOGGING ***
+                            Log.d("CameraScreen", "FPS Updated: ${"%.1f".format(fps)}")
+                            // *** END ADDED LOGGING ***
+                        }
+
+                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                        // Convert ImageProxy to RGBA ByteArray
+                        val rgbaBytes = ImageUtils.imageProxyToRgbaByteArray(imageProxy)
+
+                        if (rgbaBytes != null) {
+                            // *** ADDED LOGGING ***
+                            Log.d("CameraScreen", "RGBA ByteArray conversion successful. Size: ${rgbaBytes.size}, Rotation: $rotationDegrees")
+                            // *** END ADDED LOGGING ***
+
+                            // Store the size of the image being analyzed (original YUV dimensions)
+                            val analysisWidth = imageProxy.width
+                            val analysisHeight = imageProxy.height
+                            sourceSize = Size(analysisWidth, analysisHeight)
+                            // *** ADDED LOGGING ***
+                            Log.d("CameraScreen", "Source size updated: ${sourceSize.width}x${sourceSize.height}. Calling detector.detect...")
+                            // *** END ADDED LOGGING ***
+
+                            // Perform detection using the RGBA byte array
+                            // Pass the original width and height
+                            val results = detector.detect(rgbaBytes, analysisWidth, analysisHeight)
+                            // *** ADDED LOGGING ***
+                            Log.d("CameraScreen", "Detector returned ${results.size} results.")
+                            // *** END ADDED LOGGING ***
+                            detections = results
+
+                        } else {
+                            Log.e("CameraScreen", "Could not convert ImageProxy to RGBA ByteArray. Image format: ${imageProxy.format}")
+                        }
+
+                        imageProxy.close() // Crucial to close the ImageProxy
                     }
-
-                    // FPS calculation
-                    val currentFrameCount = frameCount.incrementAndGet()
-                    val currentTime = System.currentTimeMillis()
-                    val elapsedTime = currentTime - lastFpsTimestamp
-                    if (elapsedTime >= 1000) { // Update FPS every second
-                        fps = (currentFrameCount * 1000f) / elapsedTime
-                        frameCount.set(0) // Reset frame count
-                        lastFpsTimestamp = currentTime
-                    }
-
-                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    // Convert ImageProxy to Bitmap
-                    val bitmap = imageProxy.toBitmap() // Using the utility function
-
-                    if (bitmap != null) {
-                        // Store the size of the bitmap being analyzed
-                        // Note: After rotation in toBitmap, width/height might be swapped
-                        val analysisWidth = if (rotationDegrees == 90 || rotationDegrees == 270) bitmap.height else bitmap.width
-                        val analysisHeight = if (rotationDegrees == 90 || rotationDegrees == 270) bitmap.width else bitmap.height
-                        sourceSize = Size(analysisWidth, analysisHeight)
-
-                        // Perform detection
-                        val results = detector.detect(bitmap)
-                        detections = results
-
-                        // It's important to recycle the bitmap if it was copied or created
-                        // In this basic toBitmap, the decoded bitmap is returned, manage its lifecycle if needed.
-                        // bitmap.recycle() // Be careful with recycling if the bitmap is used elsewhere
-                    } else {
-                        Log.w("CameraScreen", "Could not convert ImageProxy to Bitmap.")
-                    }
-
-                    imageProxy.close() // Crucial to close the ImageProxy
+                } else {
+                    // If detector is not ready when analyzer is created, clear any previous analyzer
+                    Log.d("CameraScreen", "Clearing Analyzer because isDetectorReady is false")
+                    clearAnalyzer()
                 }
             }
     }
 
-    LaunchedEffect(cameraProviderFuture) {
+    // LaunchedEffect for binding now depends on imageAnalyzer instance
+    LaunchedEffect(cameraProviderFuture, imageAnalyzer) { // Add imageAnalyzer as a key
+        Log.d("CameraScreen", "LaunchedEffect for binding triggered.")
         val cameraProvider = cameraProviderFuture.get()
         val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 

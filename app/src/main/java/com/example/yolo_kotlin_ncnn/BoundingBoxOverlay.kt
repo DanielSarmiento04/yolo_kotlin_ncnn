@@ -61,20 +61,6 @@ fun BoundingBoxOverlay(
     val textMeasurer = rememberTextMeasurer()
 
     Canvas(modifier = modifier.fillMaxSize()) {
-        // *** ADDED TEST DRAW ***
-        // Draw a fixed red square in the center to test if Canvas is rendering
-        val canvasCenterX = size.width / 2f
-        val canvasCenterY = size.height / 2f
-        drawRect(
-            color = Color.Red,
-            topLeft = Offset(canvasCenterX - 50f, canvasCenterY - 50f),
-            size = Size(100f, 100f),
-            style = Stroke(width = 5f)
-        )
-        // Log that the test draw is attempted
-        Log.d(TAG, "Attempting to draw test rectangle.")
-        // *** END ADDED TEST DRAW ***
-
         if (sourceImageWidth <= 0 || sourceImageHeight <= 0) {
             Log.w(TAG, "Skipping draw: Invalid source image dimensions ($sourceImageWidth x $sourceImageHeight)")
             return@Canvas
