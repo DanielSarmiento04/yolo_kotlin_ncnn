@@ -7,6 +7,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 
 /**
  * Represents a single detected object.
@@ -41,7 +42,7 @@ class NcnnDetector(
 
     init {
         try {
-            System.loadLibrary("yolo_kotlin_ncnn") // Match library name in CMakeLists.txt
+            System.loadLibrary("native-lib")
             Log.i(TAG, "Native library loaded successfully.")
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Failed to load native library: ${e.message}")
@@ -106,29 +107,43 @@ class NcnnDetector(
     }
 
     /**
-     * Performs object detection on the provided RGBA byte array asynchronously.
+     * Performs object detection on the provided YUV image data asynchronously.
      * Requires `init()` and `loadModel()` to have been called successfully.
      *
-     * @param rgbaBytes The input image for detection as an RGBA byte array.
+     * @param yBuffer ByteBuffer for the Y plane.
+     * @param uBuffer ByteBuffer for the U plane.
+     * @param vBuffer ByteBuffer for the V plane.
+     * @param yStride Row stride for the Y plane.
+     * @param uvStride Row stride for the U/V planes.
+     * @param uvPixelStride Pixel stride for the U/V planes.
      * @param width The width of the input image.
      * @param height The height of the input image.
      * @return A list of `Detection` objects, or null if detection failed or input is invalid.
      */
-    suspend fun detect(rgbaBytes: ByteArray?, width: Int, height: Int): List<Detection>? = withContext(dispatcher) {
+    suspend fun detect(
+        yBuffer: ByteBuffer?, uBuffer: ByteBuffer?, vBuffer: ByteBuffer?,
+        yStride: Int, uvStride: Int, uvPixelStride: Int,
+        width: Int, height: Int
+    ): List<Detection>? = withContext(dispatcher) {
         if (!isInitialized || !isModelLoaded) {
             Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
             return@withContext null
         }
-        if (rgbaBytes == null || width <= 0 || height <= 0) {
-            Log.e(TAG, "Cannot detect: Invalid input data (bytes=$rgbaBytes, width=$width, height=$height).")
+        if (yBuffer == null || uBuffer == null || vBuffer == null || width <= 0 || height <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0) {
+            Log.e(TAG, "Cannot detect: Invalid YUV input data.")
             return@withContext null
         }
 
-        // 1. Call native detect function
+        // 1. Call native detect function with YUV data
         val startTime = System.currentTimeMillis()
-        val results: FloatArray? = detectNative(rgbaBytes, width, height)
+        // Ensure buffers are direct or have backing arrays accessible by JNI
+        val results: FloatArray? = detectNative(
+            yBuffer, uBuffer, vBuffer,
+            yStride, uvStride, uvPixelStride,
+            width, height
+        )
         val endTime = System.currentTimeMillis()
-        Log.d(TAG, "Native detection call took: ${endTime - startTime} ms")
+        Log.d(TAG, "Native YUV detection call took: ${endTime - startTime} ms")
 
         // 2. Parse results
         parseDetectionResults(results)
@@ -219,8 +234,12 @@ class NcnnDetector(
     /** Checks if Vulkan GPU is being used. */
     private external fun hasVulkan(): Boolean
 
-    /** Performs detection on the RGBA image byte array. */
-    private external fun detectNative(imageBytes: ByteArray, imageWidth: Int, imageHeight: Int): FloatArray?
+    /** Performs detection on the YUV image data. */
+    private external fun detectNative(
+        yBuffer: ByteBuffer, uBuffer: ByteBuffer, vBuffer: ByteBuffer,
+        yStride: Int, uvStride: Int, uvPixelStride: Int,
+        imageWidth: Int, imageHeight: Int
+    ): FloatArray?
 
     /** Releases NCNN resources. */
     private external fun releaseNative()

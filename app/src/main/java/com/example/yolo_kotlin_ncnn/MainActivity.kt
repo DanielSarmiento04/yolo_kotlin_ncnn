@@ -2,6 +2,7 @@ package com.example.yolo_kotlin_ncnn
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -29,6 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.yolo_kotlin_ncnn.ui.theme.Yolo_kotlin_ncnnTheme
 import kotlinx.coroutines.*
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -258,9 +260,12 @@ internal fun CameraScreen( // Changed visibility to internal
     val imageAnalyzer = remember(isDetectorReady, detector, scope) { // Keyed on isDetectorReady, detector, scope
         Log.d("CameraScreen", "Creating/Updating ImageAnalysis instance (isDetectorReady=$isDetectorReady)")
         ImageAnalysis.Builder()
-            .setTargetResolution(Size(640, 480)) // Match native input aspect ratio if possible
+            // Request a resolution suitable for the model, e.g., 640x480 or similar aspect ratio
+            // Higher resolution increases processing time.
+            .setTargetResolution(Size(640, 480))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888) // Ensure YUV format for ImageUtils
+            // IMPORTANT: Request YUV_420_888 format for direct buffer access
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
             .apply {
                 if (isDetectorReady) {
@@ -268,35 +273,44 @@ internal fun CameraScreen( // Changed visibility to internal
                     setAnalyzer(cameraExecutor) { imageProxy ->
                         val frameStartTime = System.currentTimeMillis()
 
-                        // --- Basic Throttling ---
-                        val minFrameIntervalMs = 16 // Corresponds to ~60 FPS max attempt rate
+                        // --- Basic Throttling (Optional but recommended) ---
+                        val minFrameIntervalMs = 16 // ~60 FPS max attempt rate
                         if (frameStartTime - lastProcessedFrameTimestamp.get() < minFrameIntervalMs) {
-                            imageProxy.close()
+                            imageProxy.close() // Close the image quickly
                             return@setAnalyzer
                         }
                         // --- End Throttling ---
 
-                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-
-                        // --- Image Conversion ---
-                        val conversionStartTime = System.nanoTime()
-                        // Need to keep imageProxy open until conversion is done inside the coroutine
-                        // Or convert here and pass bytes to coroutine. Convert here is simpler.
-                        val rgbaBytes = ImageUtils.imageProxyToRgbaByteArray(imageProxy)
-                        val conversionEndTime = System.nanoTime()
-                        val conversionTimeMs = (conversionEndTime - conversionStartTime) / 1_000_000
-
+                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees // Needed if model doesn't handle rotation
                         val analysisWidth = imageProxy.width
                         val analysisHeight = imageProxy.height
 
-                        imageProxy.close() // Close ASAP after conversion
+                        // --- Extract YUV Data ---
+                        // Check if the format is indeed YUV_420_888
+                        if (imageProxy.format == ImageFormat.YUV_420_888) {
+                            val planes = imageProxy.planes
+                            val yBuffer = planes[0].buffer
+                            val uBuffer = planes[1].buffer // U plane
+                            val vBuffer = planes[2].buffer // V plane
 
-                        if (rgbaBytes != null) {
-                            // Launch detection in a coroutine
+                            val yStride = planes[0].rowStride
+                            val uvStride = planes[1].rowStride // U/V planes usually have same stride
+                            val uvPixelStride = planes[1].pixelStride // U/V planes usually have same pixel stride
+
+                            // Close the imageProxy *after* extracting buffers and info
+                            imageProxy.close()
+
+                            // Launch detection in a coroutine, passing YUV data
                             scope.launch { // Use the composable's scope
                                 val detectStartTime = System.nanoTime()
-                                // Call the public suspend function that takes ByteArray
-                                val results: List<Detection>? = detector.detect(rgbaBytes, analysisWidth, analysisHeight)
+
+                                // Call the public suspend function that takes YUV ByteBuffers
+                                val results: List<Detection>? = detector.detect(
+                                    yBuffer, uBuffer, vBuffer,
+                                    yStride, uvStride, uvPixelStride,
+                                    analysisWidth, analysisHeight
+                                    // Pass rotationDegrees if needed by native code
+                                )
                                 val detectEndTime = System.nanoTime()
                                 val detectTimeMs = (detectEndTime - detectStartTime) / 1_000_000
 
@@ -306,13 +320,13 @@ internal fun CameraScreen( // Changed visibility to internal
                                         sourceSize = Size(analysisWidth, analysisHeight)
                                         Log.d("CameraScreen", "Source size updated: ${sourceSize.width}x${sourceSize.height}")
                                     }
-                                    // Update detections state (triggers recomposition for overlay)
+                                    // Update detections state
                                     results?.let { detections = it }
 
-                                    // --- Performance Logging & State Update (moved inside main thread update) ---
+                                    // --- Performance Logging & State Update ---
                                     val frameEndTime = System.currentTimeMillis()
-                                    val totalFrameProcessingTime = frameEndTime - frameStartTime // Approx, includes coroutine launch overhead
-                                    lastProcessedFrameTimestamp.set(frameEndTime) // Update timestamp here
+                                    val totalFrameProcessingTime = frameEndTime - frameStartTime
+                                    lastProcessedFrameTimestamp.set(frameEndTime)
 
                                     frameProcessingTimes.add(totalFrameProcessingTime)
                                     if (frameProcessingTimes.size > 10) frameProcessingTimes.removeAt(0)
@@ -324,14 +338,17 @@ internal fun CameraScreen( // Changed visibility to internal
                                         fps = (currentFrameCount * 1000f) / elapsedFpsTime
                                         frameCount.set(0)
                                         lastFpsUpdateTime = frameEndTime
-                                        Log.d("CameraScreen", "Perf Update: FPS=%.1f | Avg Proc Time=%.1f ms (Convert=%d ms, Detect=%d ms)".format(
-                                            fps, processingTimeAvgMs.value, conversionTimeMs, detectTimeMs))
+                                        // Log detect time separately now
+                                        Log.d("CameraScreen", "Perf Update: FPS=%.1f | Avg Proc Time=%.1f ms (Detect=%d ms)".format(
+                                            fps, processingTimeAvgMs.value, detectTimeMs))
                                     }
                                 } // End withContext(Dispatchers.Main)
                             } // End scope.launch
                         } else {
-                            Log.e("CameraScreen", "Could not convert ImageProxy to RGBA ByteArray. Format: ${imageProxy.format}")
-                            // Optionally clear detections if conversion fails (on main thread)
+                            // Format is not YUV_420_888, handle error or skip frame
+                            Log.e("CameraScreen", "Unexpected image format: ${imageProxy.format}. Expected YUV_420_888.")
+                            imageProxy.close() // Ensure image is closed
+                            // Optionally clear detections
                             scope.launch(Dispatchers.Main) { detections = emptyList() }
                         }
                     } // End setAnalyzer lambda
