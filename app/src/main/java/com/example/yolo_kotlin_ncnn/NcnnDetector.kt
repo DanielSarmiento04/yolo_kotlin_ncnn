@@ -18,6 +18,7 @@ class NcnnDetector(private val context: Context) {
 
     companion object {
         private const val TAG = "NcnnDetector"
+        private const val DEBUG_LOG = false // Set true for verbose native result logging
 
         // Load the native library compiled by CMake
         init {
@@ -27,7 +28,8 @@ class NcnnDetector(private val context: Context) {
                 Log.i(TAG, "Successfully loaded native-lib")
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "Failed to load native-lib", e)
-                // Handle error appropriately, maybe show a message to the user
+                // Handle error appropriately, maybe show a message to the user or disable functionality
+                throw RuntimeException("Failed to load native library 'native-lib'", e)
             }
         }
     }
@@ -48,7 +50,10 @@ class NcnnDetector(private val context: Context) {
 
     // Initialize NCNN. Call this first.
     fun init(): Boolean {
-        if (isInitialized) return true
+        if (isInitialized) {
+            Log.i(TAG, "Already initialized.")
+            return true
+        }
 
         Log.i(TAG, "Calling native init...")
         // Pass the application's asset manager to native code
@@ -69,6 +74,9 @@ class NcnnDetector(private val context: Context) {
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "Native hasVulkan method not found or mismatch", e)
                 false
+            } catch (e: Exception) {
+                 Log.e(TAG, "Exception calling native hasVulkan", e)
+                 false
             }
             Log.i(TAG, "NCNN initialized successfully. Vulkan available: $isVulkanAvailable")
         } else {
@@ -83,7 +91,10 @@ class NcnnDetector(private val context: Context) {
             Log.e(TAG, "Cannot load model: NCNN not initialized.")
             return false
         }
-        if (isModelLoaded) return true
+        if (isModelLoaded) {
+             Log.i(TAG, "Model already loaded.")
+             return true
+        }
 
         Log.i(TAG, "Calling native loadModel...")
         isModelLoaded = try {
@@ -111,10 +122,10 @@ class NcnnDetector(private val context: Context) {
      * @param rgbaBytes The input image pixel data in RGBA format.
      * @param width The width of the image corresponding to rgbaBytes.
      * @param height The height of the image corresponding to rgbaBytes.
-     * @param confidenceThreshold Minimum confidence score for a detection to be included in results.
+     * @param confidenceThreshold Minimum confidence score for a detection to be included in results (applied in Kotlin after native call).
      * @return A list of Detection objects. Returns empty list if detection fails or no objects are found.
      */
-    fun detect(rgbaBytes: ByteArray, width: Int, height: Int, confidenceThreshold: Float = 0.4f): List<Detection> {
+    fun detect(rgbaBytes: ByteArray, width: Int, height: Int, confidenceThreshold: Float = 0.25f): List<Detection> {
         if (!isInitialized || !isModelLoaded) {
             Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
             return emptyList()
@@ -126,8 +137,13 @@ class NcnnDetector(private val context: Context) {
             Log.e(TAG, "Input byte array size (${rgbaBytes.size}) does not match expected size ($expectedSize) for ${width}x${height} RGBA image.")
             return emptyList()
         }
+        if (width <= 0 || height <= 0) {
+            Log.e(TAG, "Invalid image dimensions for detection: ${width}x${height}")
+            return emptyList()
+        }
 
         // 2. Call native detect function
+        Log.d(TAG, "Calling native detect with image size: ${width}x${height}") // Log dimensions
         val startTime = System.currentTimeMillis()
         val rawResult: FloatArray? = try {
             // Pass the RGBA byte array directly along with dimensions
@@ -143,7 +159,7 @@ class NcnnDetector(private val context: Context) {
         val duration = endTime - startTime
         // Log detection time less frequently or only if > threshold to reduce spam
         // if (duration > 5) { // Example: Log only if detection takes > 5ms
-             Log.i(TAG, "Native detect call duration: ${duration} ms")
+             Log.d(TAG, "Native detect JNI call duration: ${duration} ms") // Use Debug level
         // }
 
         // 3. Parse results
@@ -152,19 +168,24 @@ class NcnnDetector(private val context: Context) {
             return emptyList()
         }
         if (rawResult.isEmpty()) {
-            // This case might happen if native code returns an empty array (e.g., size 0 or 1 with count 0)
-             Log.i(TAG, "Detection returned empty or invalid array (size ${rawResult.size}).")
+            // This case might happen if native code returns an empty array (e.g., size 0)
+             Log.d(TAG, "Detection returned empty array (size 0).") // Debug level
              return emptyList()
         }
 
         // Log raw result for debugging (optional, can be verbose)
-        // Log.d(TAG, "Raw result array (first 10 elements): ${rawResult.take(10).joinToString()}")
+        if (DEBUG_LOG) {
+             Log.d(TAG, "Raw result array (first 10 elements): ${rawResult.take(10).joinToString()}")
+        }
 
         // Format: [count, x1, y1, w1, h1, label1, conf1, x2, y2, w2, h2, label2, conf2, ...]
         val count = rawResult[0].toInt()
-        Log.d(TAG, "Parsed detection count from native: $count")
+        // Log count only if > 0 or if debugging is enabled
+        if (count > 0 || DEBUG_LOG) {
+            Log.d(TAG, "Parsed detection count from native: $count")
+        }
         if (count <= 0) {
-            // Log.i(TAG, "No objects detected by native code.") // Less verbose logging for no detections
+            // Log.d(TAG, "No objects detected by native code.") // Less verbose logging for no detections
             return emptyList()
         }
 
@@ -178,11 +199,9 @@ class NcnnDetector(private val context: Context) {
 
         for (i in 0 until count) {
             val offset = 1 + i * 6
-            // Check array bounds before accessing elements
-            if (offset + 5 >= rawResult.size) {
-                Log.e(TAG, "Index out of bounds while parsing detection $i (offset=$offset, size=${rawResult.size})")
-                break // Stop parsing if indices are invalid
-            }
+            // Bounds check already done via expectedSizeResult check above, but double-check is safe
+            // if (offset + 5 >= rawResult.size) { ... } // Redundant if initial check passes
+
             val x = rawResult[offset + 0]
             val y = rawResult[offset + 1]
             val w = rawResult[offset + 2]
@@ -194,23 +213,18 @@ class NcnnDetector(private val context: Context) {
             if (confidence >= confidenceThreshold) {
                 // Create RectF from top-left coordinates and width/height
                 // Ensure coordinates are valid before creating RectF
-                 if (x >= 0 && y >= 0 && w > 0 && h > 0) {
-                    // Clamp box to image dimensions (optional, native code should already do this)
-                    // val right = (x + w).coerceAtMost(width.toFloat())
-                    // val bottom = (y + h).coerceAtMost(height.toFloat())
-                    // val rect = RectF(x.coerceAtLeast(0f), y.coerceAtLeast(0f), right, bottom)
-                    val rect = RectF(x, y, x + w, y + h) // Use coordinates directly from native
+                 if (x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= width && y + h <= height) {
+                    // Use coordinates directly from native (already clamped and scaled)
+                    val rect = RectF(x, y, x + w, y + h)
                     detections.add(Detection(rect, label, confidence))
                  } else {
-                    Log.w(TAG, "Skipping detection with invalid coordinates from native: x=$x, y=$y, w=$w, h=$h")
+                    Log.w(TAG, "Skipping detection with invalid/out-of-bounds coords from native: Rect($x, $y, ${x+w}, ${y+h}) vs Img(${width}x${height}) | Conf=$confidence | Label=$label")
                  }
             }
         }
-        if (detections.isNotEmpty()) {
-            Log.i(TAG, "Detected ${detections.size} objects (after Kotlin thresholding/validation).")
-        } else if (count > 0) {
-             // Log if native reported count > 0 but Kotlin list is empty (due to thresholding or invalid data)
-             Log.i(TAG, "Detected 0 objects after Kotlin thresholding/validation (native count was $count).")
+        // Log final count only if different from native count or if debugging
+        if (detections.size != count || DEBUG_LOG) {
+            Log.d(TAG, "Returning ${detections.size} objects (after Kotlin thresholding/validation). Native count was $count.")
         }
         return detections
     }
@@ -222,7 +236,7 @@ class NcnnDetector(private val context: Context) {
      * @param confidenceThreshold Minimum confidence score for a detection to be included in results.
      * @return A list of Detection objects. Returns empty list if detection fails or no objects are found.
      */
-    fun detect(bitmap: Bitmap, confidenceThreshold: Float = 0.4f): List<Detection> {
+    fun detect(bitmap: Bitmap, confidenceThreshold: Float = 0.25f): List<Detection> {
         if (!isInitialized || !isModelLoaded) {
             Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
             return emptyList()
@@ -240,16 +254,12 @@ class NcnnDetector(private val context: Context) {
         }
 
         // 2. Convert Bitmap to RGBA byte array
-        // NCNN native code expects RGBA (as implemented in native-lib.cpp).
+        // NCNN native code expects RGBA (as implemented in native-lib.cpp's from_pixels_resize).
         // Android Bitmap ARGB_8888 stores pixels as ARGB. copyPixelsToBuffer extracts them in that order.
-        // We need to rearrange or tell NCNN to expect ARGB if possible, or convert here.
-        // Let's assume native-lib.cpp's from_pixels_resize handles PIXEL_RGBA correctly from the buffer.
+        // ncnn::Mat::from_pixels(..., ncnn::Mat::PIXEL_RGBA) handles the ARGB byte order from Android Bitmaps correctly.
         val bytes = ByteArray(argbBitmap.byteCount)
         val buffer = ByteBuffer.wrap(bytes)
-        argbBitmap.copyPixelsToBuffer(buffer)
-        // The buffer now contains ARGB data (or BGRA depending on endianness, but usually ARGB).
-        // If native-lib.cpp strictly needs RGBA, a conversion step is needed here.
-        // However, ncnn::Mat::from_pixels(..., ncnn::Mat::PIXEL_RGBA) might handle the ARGB byte order from Android Bitmaps. Let's rely on that for now.
+        argbBitmap.copyPixelsToBuffer(buffer) // Copies ARGB data into the buffer
 
         // 3. Call the primary detect function
         return detect(bytes, argbBitmap.width, argbBitmap.height, confidenceThreshold)
