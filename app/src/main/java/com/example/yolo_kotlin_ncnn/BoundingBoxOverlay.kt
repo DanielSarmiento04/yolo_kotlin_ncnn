@@ -20,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.random.Random
 
 private const val TAG = "BoundingBoxOverlay" // Logging tag
 
@@ -29,12 +28,15 @@ private val classColors = mutableMapOf<Int, Color>()
 private fun getColorForClass(classId: Int): Color {
     return classColors.getOrPut(classId) {
         // Generate visually distinct colors if possible
-        val hue = (classId * 60) % 360 // Spread hues
-        Color.hsv(hue = hue.toFloat(), saturation = 0.8f, value = 0.9f, alpha = 1.0f)
+        val hue = (classId * 60 + 30) % 360 // Spread hues, add offset
+        val saturation = 0.7f + (classId % 5) * 0.06f // Vary saturation slightly
+        val value = 0.8f + (classId % 4) * 0.05f // Vary value slightly
+        Color.hsv(hue = hue.toFloat(), saturation = saturation, value = value, alpha = 1.0f)
     }
 }
 
-// TODO: Replace with your actual class names if available
+// COCO class names (ensure this matches the NUM_CLASSES in native-lib.cpp)
+// Verify this list matches the classes your specific YOLOv11 model was trained on.
 private val cocoClassNames = listOf(
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
     "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
@@ -45,9 +47,10 @@ private val cocoClassNames = listOf(
     "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
     "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
     "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush", "pump", "pipe",
-    "steel pipe", "electric cable"
-)
+    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush" // 80 classes for standard COCO
+    // Add more if your model has more classes (e.g., up to NUM_CLASSES)
+    // "pump", "pipe", "steel pipe", "electric cable" // Example custom classes
+) // Make sure the size matches NUM_CLASSES used in C++
 
 @Composable
 fun BoundingBoxOverlay(
@@ -61,8 +64,10 @@ fun BoundingBoxOverlay(
     val textMeasurer = rememberTextMeasurer()
 
     Canvas(modifier = modifier.fillMaxSize()) {
+        // Check for valid dimensions before proceeding
         if (sourceImageWidth <= 0 || sourceImageHeight <= 0) {
-            Log.w(TAG, "Skipping draw: Invalid source image dimensions ($sourceImageWidth x $sourceImageHeight)")
+            // Log only once or less frequently if this state persists
+            // Log.w(TAG, "Skipping draw: Invalid source image dimensions ($sourceImageWidth x $sourceImageHeight)")
             return@Canvas
         }
 
@@ -70,9 +75,9 @@ fun BoundingBoxOverlay(
         val canvasHeight = size.height
 
         // --- Scaling Logic ---
-        // This logic assumes the camera preview (like PreviewView) uses a scale type
-        // equivalent to FIT_CENTER. It scales the source image dimensions to fit within
-        // the canvas while maintaining aspect ratio, then centers the result.
+        // Assumes the camera preview uses scale type FIT_CENTER.
+        // Scales the source image dimensions to fit within the canvas while maintaining aspect ratio,
+        // then calculates the offset to center the scaled image.
         val scaleX = canvasWidth / sourceImageWidth.toFloat()
         val scaleY = canvasHeight / sourceImageHeight.toFloat()
         val scale = min(scaleX, scaleY) // Use the smaller scale factor to ensure the image fits
@@ -86,8 +91,11 @@ fun BoundingBoxOverlay(
         val offsetY = (canvasHeight - scaledImageHeight) / 2f
         // --- End Scaling Logic ---
 
+        // Log scaling factors once if dimensions change significantly (optional)
+        // Log.d(TAG, "Canvas: ${canvasWidth}x${canvasHeight}, Source: ${sourceImageWidth}x${sourceImageHeight}, Scale: $scale, Offset: ${offsetX}x${offsetY}")
+
         detections.forEach { detection ->
-            val rect = detection.rect
+            val rect = detection.rect // Bounding box in original image coordinates
             val color = getColorForClass(detection.label)
             val labelId = detection.label
             val confidence = detection.confidence
@@ -98,17 +106,19 @@ fun BoundingBoxOverlay(
             val scaledWidth = rect.width() * scale
             val scaledHeight = rect.height() * scale
 
-            // Ensure coordinates are within canvas bounds (optional, but good practice)
+            // Ensure coordinates are within canvas bounds after scaling and offset
             val canvasLeft = max(0f, scaledLeft)
             val canvasTop = max(0f, scaledTop)
+            // Calculate right/bottom based on scaled dimensions before clamping top/left
             val canvasRight = min(canvasWidth, scaledLeft + scaledWidth)
             val canvasBottom = min(canvasHeight, scaledTop + scaledHeight)
+            // Calculate clamped width/height based on clamped coordinates
             val canvasWidthClamped = canvasRight - canvasLeft
             val canvasHeightClamped = canvasBottom - canvasTop
 
-            // Skip drawing if the box is entirely outside or has no size
-            if (canvasWidthClamped <= 0 || canvasHeightClamped <= 0) {
-                 Log.v(TAG, "Skipping box outside canvas: Label=${labelId}")
+            // Skip drawing if the box is entirely outside the canvas or has zero/negative size after clamping
+            if (canvasWidthClamped <= strokeWidthPx / 2 || canvasHeightClamped <= strokeWidthPx / 2) {
+                 // Log.v(TAG, "Skipping box outside canvas or too small: Label=${labelId}") // Verbose log
                  return@forEach // Continue to next detection
             }
 
@@ -120,31 +130,49 @@ fun BoundingBoxOverlay(
                 style = Stroke(width = strokeWidthPx)
             )
 
-            // Prepare text label
-            val className = cocoClassNames.getOrElse(labelId) { "Class $labelId" }
+            // Prepare text label using class names list
+            val className = cocoClassNames.getOrElse(labelId) { "ID $labelId" } // Fallback to ID if name not found
             val labelText = "$className: ${"%.2f".format(confidence)}"
             val textStyle = TextStyle(
                 color = Color.White,
                 fontSize = 14.sp, // Adjust size as needed
                 fontWeight = FontWeight.Bold,
-                background = color.copy(alpha = 0.7f) // Semi-transparent background
+                background = color.copy(alpha = 0.7f) // Semi-transparent background matching box color
             )
 
             // Measure the text
             val textLayoutResult: TextLayoutResult = textMeasurer.measure(
                 text = AnnotatedString(labelText),
-                style = textStyle
+                style = textStyle,
+                maxLines = 1 // Ensure text stays on one line
             )
 
-            // Calculate position for the text label (above the box)
-            val textX = canvasLeft + strokeWidthPx // Small padding from the left edge
-            val textY = canvasTop - textLayoutResult.size.height - strokeWidthPx // Position above the box
-            val textTopLeft = Offset(textX, max(0f, textY)) // Ensure text isn't drawn above canvas top
+            // Calculate position for the text label (prefer above the box, move inside if needed)
+            val textWidth = textLayoutResult.size.width
+            val textHeight = textLayoutResult.size.height
+
+            // Position text slightly inside the box from the top-left corner
+            var textX = canvasLeft + strokeWidthPx
+            var textY = canvasTop + strokeWidthPx
+
+            // Optional: Try to place text above the box if there's space
+            val potentialTextYAbove = canvasTop - textHeight - strokeWidthPx
+            if (potentialTextYAbove >= 0) { // Check if it fits above within canvas bounds
+                 textY = potentialTextYAbove
+            }
+
+            // Ensure text doesn't go outside the right edge of the canvas
+            if (textX + textWidth > canvasWidth) {
+                textX = canvasWidth - textWidth - strokeWidthPx // Adjust to fit
+            }
+            // Ensure text doesn't go outside the bottom edge (if placed inside) or top edge (if placed above)
+            textY = textY.coerceIn(0f, canvasHeight - textHeight)
+
 
             // Draw the text label
             drawText(
                 textLayoutResult = textLayoutResult,
-                topLeft = textTopLeft
+                topLeft = Offset(textX, textY)
             )
         }
     }
