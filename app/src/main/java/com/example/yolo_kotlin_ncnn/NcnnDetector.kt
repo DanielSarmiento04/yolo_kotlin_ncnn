@@ -2,292 +2,230 @@ package com.example.yolo_kotlin_ncnn
 
 import android.content.Context
 import android.content.res.AssetManager
-import android.graphics.Bitmap
 import android.graphics.RectF
-import java.nio.ByteBuffer
 import android.util.Log
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-class NcnnDetector(private val context: Context) {
+/**
+ * Represents a single detected object.
+ *
+ * @param label The index of the detected class label.
+ * @param confidence The confidence score of the detection (0.0 to 1.0).
+ * @param rect The bounding box of the detected object in original image coordinates.
+ */
+data class Detection(
+    val label: Int,
+    val confidence: Float,
+    val rect: RectF
+)
 
-    // Data class to hold detection results
-    data class Detection(
-        val rect: RectF,    // Bounding box in original image coordinates
-        val label: Int,     // Class index
-        val confidence: Float // Confidence score
-    )
-
-    companion object {
-        private const val TAG = "NcnnDetector"
-        private const val DEBUG_LOG = false // Set true for verbose native result logging
-
-        // Load the native library compiled by CMake
-        init {
-            try {
-                // Ensure this matches your CMakeLists.txt target name and library filename (libnative-lib.so)
-                System.loadLibrary("native-lib")
-                Log.i(TAG, "Successfully loaded native-lib")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Failed to load native-lib", e)
-                // Handle error appropriately, maybe show a message to the user or disable functionality
-                throw RuntimeException("Failed to load native library 'native-lib'", e)
-            }
-        }
-    }
-
-    // Native method declarations matching C++ JNI functions
-    // Note: AssetManager is passed directly from Kotlin
-    private external fun initNative(assetManager: AssetManager): Boolean
-    private external fun loadModel(assetManager: AssetManager): Boolean
-    private external fun hasVulkan(): Boolean // Checks if Vulkan is being used by NCNN
-    // Updated detect signature to take ByteArray, width, height
-    private external fun detect(imageBytes: ByteArray, width: Int, height: Int): FloatArray?
-    private external fun releaseNative()
-
-    // State variables managed by the Kotlin wrapper
+/**
+ * Manages the NCNN YOLOv11 detector instance and interactions via JNI.
+ *
+ * This class handles initialization, model loading, running inference asynchronously,
+ * and releasing native resources.
+ *
+ * @param context The application context, used to access assets.
+ * @param dispatcher The coroutine dispatcher for running inference (defaults to IO).
+ */
+class NcnnDetector(
+    context: Context,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO
+) {
+    private val assetManager: AssetManager = context.assets
     private var isInitialized = false
     private var isModelLoaded = false
-    private var isVulkanAvailable = false // Store Vulkan status after init
+    private var hasVulkanGpu = false
 
-    // Initialize NCNN. Call this first.
-    fun init(): Boolean {
-        if (isInitialized) {
-            Log.i(TAG, "Already initialized.")
-            return true
-        }
-
-        Log.i(TAG, "Calling native init...")
-        // Pass the application's asset manager to native code
-        isInitialized = try {
-            // Pass context.assets which is the AssetManager
-            initNative(context.assets)
+    init {
+        try {
+            System.loadLibrary("yolo_kotlin_ncnn") // Match library name in CMakeLists.txt
+            Log.i(TAG, "Native library loaded successfully.")
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Native init method not found or mismatch", e)
-            false
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during native init", e)
-            false
+            Log.e(TAG, "Failed to load native library: ${e.message}")
+            // Handle library loading failure (e.g., show error to user)
         }
-
-        if (isInitialized) {
-            isVulkanAvailable = try {
-                hasVulkan() // Check Vulkan status after successful init
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Native hasVulkan method not found or mismatch", e)
-                false
-            } catch (e: Exception) {
-                 Log.e(TAG, "Exception calling native hasVulkan", e)
-                 false
-            }
-            Log.i(TAG, "NCNN initialized successfully. Vulkan available: $isVulkanAvailable")
-        } else {
-            Log.e(TAG, "NCNN initialization failed")
-        }
-        return isInitialized
-    }
-
-    // Load the YOLO model. Requires init() to be called first.
-    fun loadModel(): Boolean {
-        if (!isInitialized) {
-            Log.e(TAG, "Cannot load model: NCNN not initialized.")
-            return false
-        }
-        if (isModelLoaded) {
-             Log.i(TAG, "Model already loaded.")
-             return true
-        }
-
-        Log.i(TAG, "Calling native loadModel...")
-        isModelLoaded = try {
-            // Pass context.assets which is the AssetManager
-            loadModel(context.assets)
-        } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Native loadModel method not found or mismatch", e)
-            false
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during native loadModel", e)
-            false
-        }
-
-        if (isModelLoaded) {
-            Log.i(TAG, "YOLO model loaded successfully")
-        } else {
-            Log.e(TAG, "Failed to load YOLO model")
-        }
-        return isModelLoaded
     }
 
     /**
-     * Detect objects in an RGBA ByteArray.
+     * Initializes the native NCNN environment.
+     * Must be called before loading the model or running detection.
+     * Checks for Vulkan support.
      *
-     * @param rgbaBytes The input image pixel data in RGBA format.
-     * @param width The width of the image corresponding to rgbaBytes.
-     * @param height The height of the image corresponding to rgbaBytes.
-     * @param confidenceThreshold Minimum confidence score for a detection to be included in results (applied in Kotlin after native call).
-     * @return A list of Detection objects. Returns empty list if detection fails or no objects are found.
+     * @return True if initialization was successful, false otherwise.
      */
-    fun detect(rgbaBytes: ByteArray, width: Int, height: Int, confidenceThreshold: Float = 0.25f): List<Detection> {
+    suspend fun init(): Boolean = withContext(dispatcher) {
+        if (isInitialized) {
+            Log.i(TAG, "NCNN already initialized.")
+            return@withContext true
+        }
+        isInitialized = initNative(assetManager)
+        if (isInitialized) {
+            hasVulkanGpu = hasVulkan()
+            Log.i(TAG, "NCNN initialized successfully. Vulkan GPU available: $hasVulkanGpu")
+        } else {
+            Log.e(TAG, "NCNN initialization failed.")
+        }
+        isInitialized
+    }
+
+    /**
+     * Loads the YOLOv11 model from assets.
+     * Requires `init()` to have been called successfully.
+     *
+     * @return True if the model was loaded successfully, false otherwise.
+     */
+    suspend fun loadModel(): Boolean = withContext(dispatcher) {
+        if (!isInitialized) {
+            Log.e(TAG, "Cannot load model: NCNN not initialized.")
+            return@withContext false
+        }
+        if (isModelLoaded) {
+            Log.i(TAG, "Model already loaded.")
+            return@withContext true
+        }
+        isModelLoaded = loadModel(assetManager)
+        if (isModelLoaded) {
+            Log.i(TAG, "YOLOv11 model loaded successfully.")
+        } else {
+            Log.e(TAG, "Failed to load YOLOv11 model.")
+        }
+        isModelLoaded
+    }
+
+    /**
+     * Checks if Vulkan GPU is being used by the detector.
+     * Requires `init()` to have been called.
+     *
+     * @return True if Vulkan is initialized and used, false otherwise.
+     */
+    fun isVulkanSupported(): Boolean {
+        return isInitialized && hasVulkanGpu
+    }
+
+    /**
+     * Performs object detection on the provided RGBA byte array asynchronously.
+     * Requires `init()` and `loadModel()` to have been called successfully.
+     *
+     * @param rgbaBytes The input image for detection as an RGBA byte array.
+     * @param width The width of the input image.
+     * @param height The height of the input image.
+     * @return A list of `Detection` objects, or null if detection failed or input is invalid.
+     */
+    suspend fun detect(rgbaBytes: ByteArray?, width: Int, height: Int): List<Detection>? = withContext(dispatcher) {
         if (!isInitialized || !isModelLoaded) {
             Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
-            return emptyList()
+            return@withContext null
+        }
+        if (rgbaBytes == null || width <= 0 || height <= 0) {
+            Log.e(TAG, "Cannot detect: Invalid input data (bytes=$rgbaBytes, width=$width, height=$height).")
+            return@withContext null
         }
 
-        // 1. Validate input
-        val expectedSize = width * height * 4
-        if (rgbaBytes.size != expectedSize) {
-            Log.e(TAG, "Input byte array size (${rgbaBytes.size}) does not match expected size ($expectedSize) for ${width}x${height} RGBA image.")
-            return emptyList()
-        }
-        if (width <= 0 || height <= 0) {
-            Log.e(TAG, "Invalid image dimensions for detection: ${width}x${height}")
-            return emptyList()
-        }
-
-        // 2. Call native detect function
-        Log.d(TAG, "Calling native detect with image size: ${width}x${height}") // Log dimensions
+        // 1. Call native detect function
         val startTime = System.currentTimeMillis()
-        val rawResult: FloatArray? = try {
-            // Pass the RGBA byte array directly along with dimensions
-            detect(rgbaBytes, width, height)
-        } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Native detect method not found or mismatch", e)
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during native detection call", e)
-            null
-        }
+        val results: FloatArray? = detectNative(rgbaBytes, width, height)
         val endTime = System.currentTimeMillis()
-        val duration = endTime - startTime
-        // Log detection time less frequently or only if > threshold to reduce spam
-        // if (duration > 5) { // Example: Log only if detection takes > 5ms
-             Log.d(TAG, "Native detect JNI call duration: ${duration} ms") // Use Debug level
-        // }
+        Log.d(TAG, "Native detection call took: ${endTime - startTime} ms")
 
-        // 3. Parse results
-        if (rawResult == null) {
-            Log.w(TAG, "Detection returned null result from native code.")
-            return emptyList()
-        }
-        if (rawResult.isEmpty()) {
-            // This case might happen if native code returns an empty array (e.g., size 0)
-             Log.d(TAG, "Detection returned empty array (size 0).") // Debug level
-             return emptyList()
-        }
+        // 2. Parse results
+        parseDetectionResults(results)
+    }
 
-        // Log raw result for debugging (optional, can be verbose)
-        if (DEBUG_LOG) {
-             Log.d(TAG, "Raw result array (first 10 elements): ${rawResult.take(10).joinToString()}")
+    /**
+     * Parses the float array returned by the native `detectNative` function.
+     * Format: [count, x1_1, y1_1, w_1, h_1, label_1, score_1, x1_2, y1_2, ...]
+     */
+    private fun parseDetectionResults(results: FloatArray?): List<Detection>? {
+        if (results == null) {
+            Log.e(TAG, "Detection failed: Native function returned null.")
+            return null
+        }
+        if (results.isEmpty()) {
+            Log.w(TAG, "Detection returned empty results array.")
+            return emptyList() // No error, but no results
         }
 
-        // Format: [count, x1, y1, w1, h1, label1, conf1, x2, y2, w2, h2, label2, conf2, ...]
-        val count = rawResult[0].toInt()
-        // Log count only if > 0 or if debugging is enabled
-        if (count > 0 || DEBUG_LOG) {
-            Log.d(TAG, "Parsed detection count from native: $count")
-        }
+        val count = results[0].toInt()
         if (count <= 0) {
-            // Log.d(TAG, "No objects detected by native code.") // Less verbose logging for no detections
-            return emptyList()
+            return emptyList() // Valid result, just no detections
+        }
+
+        val expectedSize = 1 + count * 6
+        if (results.size != expectedSize) {
+            Log.e(TAG, "Result array size mismatch. Expected: $expectedSize, Got: ${results.size}")
+            return null // Corrupted results
         }
 
         val detections = mutableListOf<Detection>()
-        // Expected size check based on the count received
-        val expectedSizeResult = 1 + count * 6
-        if (rawResult.size < expectedSizeResult) {
-             Log.e(TAG, "Result array size (${rawResult.size}) is smaller than expected ($expectedSizeResult) for $count detections.")
-             return emptyList() // Avoid IndexOutOfBoundsException
-        }
-
         for (i in 0 until count) {
             val offset = 1 + i * 6
-            // Bounds check already done via expectedSizeResult check above, but double-check is safe
-            // if (offset + 5 >= rawResult.size) { ... } // Redundant if initial check passes
+            try {
+                val x = results[offset + 0]
+                val y = results[offset + 1]
+                val w = results[offset + 2]
+                val h = results[offset + 3]
+                val label = results[offset + 4].toInt()
+                val score = results[offset + 5]
 
-            val x = rawResult[offset + 0]
-            val y = rawResult[offset + 1]
-            val w = rawResult[offset + 2]
-            val h = rawResult[offset + 3]
-            val label = rawResult[offset + 4].toInt()
-            val confidence = rawResult[offset + 5]
+                // Basic validation
+                if (x < 0f || y < 0f || w <= 0f || h <= 0f || label < 0 || score < 0f || score > 1f) {
+                     Log.w(TAG, "Skipping invalid detection data at index $i: [x=$x, y=$y, w=$w, h=$h, label=$label, score=$score]")
+                     continue
+                }
 
-            // Apply confidence threshold (can be redundant if already done in native, but safe)
-            if (confidence >= confidenceThreshold) {
-                // Create RectF from top-left coordinates and width/height
-                // Ensure coordinates are valid before creating RectF
-                 if (x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= width && y + h <= height) {
-                    // Use coordinates directly from native (already clamped and scaled)
-                    val rect = RectF(x, y, x + w, y + h)
-                    detections.add(Detection(rect, label, confidence))
-                 } else {
-                    Log.w(TAG, "Skipping detection with invalid/out-of-bounds coords from native: Rect($x, $y, ${x+w}, ${y+h}) vs Img(${width}x${height}) | Conf=$confidence | Label=$label")
-                 }
+                detections.add(
+                    Detection(
+                        label = label,
+                        confidence = score,
+                        rect = RectF(x, y, x + w, y + h) // Create RectF from x, y, w, h
+                    )
+                )
+            } catch (e: ArrayIndexOutOfBoundsException) {
+                Log.e(TAG, "Error parsing detection results at index $i. Array index out of bounds.", e)
+                return null // Indicate failure due to parsing error
             }
         }
-        // Log final count only if different from native count or if debugging
-        if (detections.size != count || DEBUG_LOG) {
-            Log.d(TAG, "Returning ${detections.size} objects (after Kotlin thresholding/validation). Native count was $count.")
-        }
+        Log.i(TAG, "Successfully parsed $count detections.")
         return detections
     }
 
     /**
-     * Detect objects in a Bitmap. Converts Bitmap to RGBA ByteArray first.
-     *
-     * @param bitmap The input image. IMPORTANT: Will be converted to ARGB_8888 if not already.
-     * @param confidenceThreshold Minimum confidence score for a detection to be included in results.
-     * @return A list of Detection objects. Returns empty list if detection fails or no objects are found.
+     * Releases the native NCNN resources.
+     * Should be called when the detector is no longer needed (e.g., in onDestroy).
      */
-    fun detect(bitmap: Bitmap, confidenceThreshold: Float = 0.25f): List<Detection> {
-        if (!isInitialized || !isModelLoaded) {
-            Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
-            return emptyList()
-        }
-
-        // 1. Ensure Bitmap is in ARGB_8888 format for reliable byte extraction
-        val argbBitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
-            bitmap
-        } else {
-            Log.w(TAG, "Input bitmap is not ARGB_8888 (was ${bitmap.config}), converting...")
-            bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: run {
-                Log.e(TAG, "Failed to convert bitmap to ARGB_8888.")
-                return emptyList()
-            }
-        }
-
-        // 2. Convert Bitmap to RGBA byte array
-        // NCNN native code expects RGBA (as implemented in native-lib.cpp's from_pixels_resize).
-        // Android Bitmap ARGB_8888 stores pixels as ARGB. copyPixelsToBuffer extracts them in that order.
-        // ncnn::Mat::from_pixels(..., ncnn::Mat::PIXEL_RGBA) handles the ARGB byte order from Android Bitmaps correctly.
-        val bytes = ByteArray(argbBitmap.byteCount)
-        val buffer = ByteBuffer.wrap(bytes)
-        argbBitmap.copyPixelsToBuffer(buffer) // Copies ARGB data into the buffer
-
-        // 3. Call the primary detect function
-        return detect(bytes, argbBitmap.width, argbBitmap.height, confidenceThreshold)
-    }
-
-    // Check if Vulkan is supported and enabled
-    fun isVulkanSupported(): Boolean {
-        // Return the status determined during init
-        return isInitialized && isVulkanAvailable
-    }
-
-    // Release NCNN resources. Call this when the detector is no longer needed (e.g., in onDestroy).
     fun release() {
         if (isInitialized) {
-            Log.i(TAG, "Calling native release...")
-            try {
-                releaseNative()
-                isInitialized = false
-                isModelLoaded = false
-                isVulkanAvailable = false
-                Log.i(TAG, "NCNN resources released successfully via native call.")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Native release method not found or mismatch", e)
-            } catch (e: Exception) {
-                Log.e(TAG, "Exception during native release", e)
-            }
+            releaseNative()
+            Log.i(TAG, "NCNN resources released.")
+            isInitialized = false
+            isModelLoaded = false
+            hasVulkanGpu = false
         } else {
-            Log.w(TAG, "Release called but NCNN was not initialized.")
+            Log.i(TAG, "NCNN resources already released or never initialized.")
         }
+    }
+
+    // --- Native Method Declarations ---
+
+    /** Initializes NCNN environment. */
+    private external fun initNative(assetManager: AssetManager): Boolean
+
+    /** Loads the NCNN model files. */
+    private external fun loadModel(assetManager: AssetManager): Boolean
+
+    /** Checks if Vulkan GPU is being used. */
+    private external fun hasVulkan(): Boolean
+
+    /** Performs detection on the RGBA image byte array. */
+    private external fun detectNative(imageBytes: ByteArray, imageWidth: Int, imageHeight: Int): FloatArray?
+
+    /** Releases NCNN resources. */
+    private external fun releaseNative()
+
+    companion object {
+        private const val TAG = "NcnnDetector"
     }
 }

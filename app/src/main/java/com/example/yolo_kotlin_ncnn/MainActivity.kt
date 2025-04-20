@@ -21,20 +21,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.yolo_kotlin_ncnn.ui.theme.Yolo_kotlin_ncnnTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
+
+// Define states for initialization status
+internal enum class InitStatus { // Changed from private to internal
+    IDLE, PENDING, SUCCESS, FAILED
+}
 
 class MainActivity : ComponentActivity() {
     // Lazy initialization of the detector
@@ -46,9 +50,9 @@ class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
 
     // State for initialization status, using mutableStateOf for Compose reactivity
-    private val isDetectorReady = mutableStateOf(false)
-    private val initializationAttempted = AtomicBoolean(false)
+    private val initializationStatus = mutableStateOf(InitStatus.IDLE)
     private var isVulkanUsed = false // Store whether Vulkan is active
+    private var initErrorMessage = mutableStateOf<String?>(null) // Store error message
 
     // Permission handling
     private val requestPermissionLauncher =
@@ -56,15 +60,21 @@ class MainActivity : ComponentActivity() {
             if (isGranted) {
                 Log.i(TAG, "Camera permission granted")
                 // Re-trigger composition to potentially start camera setup
-                setContent { AppContent() }
-                // Attempt initialization again if permission was just granted and it failed before
-                if (!isDetectorReady.value) {
+                setContent { AppContent() } // Recompose to reflect permission change
+                // Attempt initialization if not already successful or pending
+                if (initializationStatus.value == InitStatus.IDLE || initializationStatus.value == InitStatus.FAILED) {
                     initializeDetector()
                 }
             } else {
                 Log.e(TAG, "Camera permission denied")
-                // Handle permission denial (e.g., show a message)
-                // You might want to display a permanent message in the UI here
+                // Update UI to show persistent denial message
+                setContent {
+                    Yolo_kotlin_ncnnTheme {
+                        Surface(modifier = Modifier.fillMaxSize()) {
+                            PermissionRationale(isDeniedPermanently = true)
+                        }
+                    }
+                }
             }
         }
 
@@ -73,49 +83,60 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Initialize detector only if permission is already granted
+        // Check permission and initialize if granted, otherwise AppContent will request
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             initializeDetector()
         } else {
-            Log.i(TAG, "Camera permission not yet granted. Requesting...")
-            // Permission will be requested by AppContent
+            Log.i(TAG, "Camera permission not yet granted. Requesting via UI.")
         }
 
         setContent { AppContent() }
     }
 
     private fun initializeDetector() {
-        // Prevent multiple initialization attempts
-        if (initializationAttempted.getAndSet(true)) {
-            Log.d(TAG, "Initialization already attempted.")
+        // Prevent multiple concurrent initializations
+        if (initializationStatus.value == InitStatus.PENDING || initializationStatus.value == InitStatus.SUCCESS) {
+            Log.d(TAG, "Initialization already pending or successful.")
             return
-        }
-        if (isDetectorReady.value) {
-             Log.d(TAG, "Detector already initialized.")
-             return
         }
 
         Log.i(TAG, "Starting detector initialization...")
-        lifecycleScope.launch(Dispatchers.IO) { // Use IO dispatcher for potentially blocking native calls
-            val initOk = detector.init()
-            if (initOk) {
-                isVulkanUsed = detector.isVulkanSupported() // Check Vulkan status after init
-                Log.i(TAG, "Detector init successful. Loading model... (Vulkan: $isVulkanUsed)")
-                val modelOk = detector.loadModel()
-                if (modelOk) {
-                    Log.i(TAG, "Model load successful.")
-                    // Update state on the main thread for Compose
-                    withContext(Dispatchers.Main) {
-                        isDetectorReady.value = true
-                        Log.i(TAG, "Detector is ready. isDetectorReady state is now: ${isDetectorReady.value}")
+        initializationStatus.value = InitStatus.PENDING
+        initErrorMessage.value = null // Clear previous errors
+
+        lifecycleScope.launch(Dispatchers.IO) { // Use IO dispatcher for native calls
+            try {
+                val initOk = detector.init()
+                if (initOk) {
+                    isVulkanUsed = detector.isVulkanSupported() // Check Vulkan status after init
+                    Log.i(TAG, "Detector init successful. Loading model... (Vulkan: $isVulkanUsed)")
+                    val modelOk = detector.loadModel()
+                    if (modelOk) {
+                        Log.i(TAG, "Model load successful.")
+                        withContext(Dispatchers.Main) {
+                            initializationStatus.value = InitStatus.SUCCESS
+                            Log.i(TAG, "Detector is ready. Initialization status: ${initializationStatus.value}")
+                        }
+                    } else {
+                        Log.e(TAG, "Failed to load model.")
+                        withContext(Dispatchers.Main) {
+                            initializationStatus.value = InitStatus.FAILED
+                            initErrorMessage.value = "Failed to load model. Check logs and asset files."
+                        }
                     }
                 } else {
-                    Log.e(TAG, "Failed to load model.")
-                    initializationAttempted.set(false) // Allow retry if model load fails
+                    Log.e(TAG, "Failed to initialize detector.")
+                    withContext(Dispatchers.Main) {
+                        initializationStatus.value = InitStatus.FAILED
+                        initErrorMessage.value = "Failed to initialize NCNN. Check logs."
+                    }
                 }
-            } else {
-                Log.e(TAG, "Failed to initialize detector.")
-                initializationAttempted.set(false) // Allow retry if init fails
+            } catch (e: Exception) {
+                 Log.e(TAG, "Exception during detector initialization", e)
+                 withContext(Dispatchers.Main) {
+                     initializationStatus.value = InitStatus.FAILED
+                     initErrorMessage.value = "Error during initialization: ${e.localizedMessage}"
+                 }
             }
         }
     }
@@ -125,14 +146,14 @@ class MainActivity : ComponentActivity() {
         Yolo_kotlin_ncnnTheme {
             Surface(modifier = Modifier.fillMaxSize()) {
                 val cameraPermissionGranted = ContextCompat.checkSelfPermission(
-                    LocalContext.current, // Use LocalContext within Composable
+                    LocalContext.current,
                     Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
 
                 if (cameraPermissionGranted) {
-                    // Ensure initialization is triggered if needed (e.g., after permission grant)
-                    LaunchedEffect(Unit) {
-                        if (!isDetectorReady.value && !initializationAttempted.get()) {
+                    // Ensure initialization is triggered if needed (e.g., after permission grant or config change)
+                    LaunchedEffect(Unit) { // Runs once when entering composition if permission is granted
+                        if (initializationStatus.value == InitStatus.IDLE) {
                              initializeDetector()
                         }
                     }
@@ -140,8 +161,9 @@ class MainActivity : ComponentActivity() {
                     CameraScreen(
                         detector = detector,
                         cameraExecutor = cameraExecutor,
-                        isDetectorReady = isDetectorReady.value, // Pass the current boolean value
-                        isVulkanUsed = isVulkanUsed // Pass Vulkan status
+                        initStatus = initializationStatus.value, // Pass the current status enum
+                        isVulkanUsed = isVulkanUsed, // Pass Vulkan status
+                        errorMessage = initErrorMessage.value // Pass error message
                     )
                 } else {
                     // Request permission if not granted
@@ -158,46 +180,64 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "onDestroy called, releasing NCNN detector and shutting down camera executor.")
-        // Release detector resources
-        // Run release on a background thread if it might block
-        // lifecycleScope.launch(Dispatchers.IO) { detector.release() } // Option 1: Coroutine
-        cameraExecutor.execute { detector.release() } // Option 2: Use existing executor if appropriate
+        // Release detector resources safely
+        // Use a coroutine or the executor, ensure it completes if possible
+        lifecycleScope.launch(Dispatchers.IO) {
+             try {
+                 detector.release() // release() has internal checks
+             } catch (e: Exception) {
+                 Log.e(TAG, "Exception during detector release", e)
+             }
+        }
 
         // Shutdown executor
         if (!cameraExecutor.isShutdown) {
-            cameraExecutor.shutdown()
-            Log.d(TAG,"Camera executor shut down.")
+            try {
+                cameraExecutor.shutdown()
+                Log.d(TAG,"Camera executor shut down.")
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Failed to shutdown camera executor", e)
+            }
         }
     }
 }
 
 @Composable
-fun PermissionRationale() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+fun PermissionRationale(isDeniedPermanently: Boolean = false) {
+    Box(modifier = Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-             Text("Camera permission is required.")
-             Spacer(modifier = Modifier.height(8.dp))
-             Text("Please grant permission to use the camera features.")
+             Text("Camera Permission Required", style = MaterialTheme.typography.headlineSmall)
+             Spacer(modifier = Modifier.height(16.dp))
+             Text(
+                 if (isDeniedPermanently) "Camera permission was denied. Please enable it in app settings to use this feature."
+                 else "This app needs camera access to perform real-time object detection.",
+                 textAlign = TextAlign.Center
+             )
+             // Optionally add a button to open app settings if permanently denied
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraScreen(
+internal fun CameraScreen( // Changed visibility to internal
     detector: NcnnDetector,
     cameraExecutor: ExecutorService,
-    isDetectorReady: Boolean, // Receive the state value
-    isVulkanUsed: Boolean     // Receive Vulkan status
+    initStatus: InitStatus, // Receive the initialization status
+    isVulkanUsed: Boolean,    // Receive Vulkan status
+    errorMessage: String?     // Receive potential error message
 ) {
+    val isDetectorReady = initStatus == InitStatus.SUCCESS // Derived state
+
     // Log the value of isDetectorReady received by this composable instance
-    Log.d("CameraScreen", "Composable recomposed/launched. isDetectorReady = $isDetectorReady, isVulkanUsed = $isVulkanUsed")
+    Log.d("CameraScreen", "Composable recomposed/launched. InitStatus = $initStatus, isDetectorReady = $isDetectorReady, isVulkanUsed = $isVulkanUsed")
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope() // Get a CoroutineScope tied to the composable lifecycle
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
 
-    var detections by remember { mutableStateOf<List<NcnnDetector.Detection>>(emptyList()) }
+    var detections by remember { mutableStateOf<List<Detection>>(emptyList()) } // Updated type
     // Store the size of the image *sent* for detection (from ImageProxy)
     var sourceSize by remember { mutableStateOf(Size(0, 0)) }
 
@@ -215,11 +255,9 @@ fun CameraScreen(
     val preview = remember { Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) } }
 
     // Make imageAnalyzer creation/update depend on isDetectorReady
-    val imageAnalyzer = remember(isDetectorReady) { // Keyed on isDetectorReady
+    val imageAnalyzer = remember(isDetectorReady, detector, scope) { // Keyed on isDetectorReady, detector, scope
         Log.d("CameraScreen", "Creating/Updating ImageAnalysis instance (isDetectorReady=$isDetectorReady)")
         ImageAnalysis.Builder()
-            // Set a resolution appropriate for the model input and performance.
-            // 640x480 is a common choice. Higher resolution increases processing time.
             .setTargetResolution(Size(640, 480)) // Match native input aspect ratio if possible
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888) // Ensure YUV format for ImageUtils
@@ -229,16 +267,8 @@ fun CameraScreen(
                     Log.i("CameraScreen", "Detector is ready, setting analyzer.")
                     setAnalyzer(cameraExecutor) { imageProxy ->
                         val frameStartTime = System.currentTimeMillis()
-                        // --- Frame Throttling (Optional Refinement) ---
-                        // Consider dynamic throttling based on average processing time vs target FPS
-                        // val targetFrameTimeMs = 33 // ~30 FPS target
-                        // if (frameStartTime - lastProcessedFrameTimestamp.get() < targetFrameTimeMs) {
-                        //     imageProxy.close()
-                        //     return@setAnalyzer
-                        // }
+
                         // --- Basic Throttling ---
-                        // Skip frame if analysis is too fast (e.g., < 20ms) to prevent queue buildup
-                        // Adjust based on observed performance. Lower value allows higher potential FPS.
                         val minFrameIntervalMs = 16 // Corresponds to ~60 FPS max attempt rate
                         if (frameStartTime - lastProcessedFrameTimestamp.get() < minFrameIntervalMs) {
                             imageProxy.close()
@@ -246,106 +276,100 @@ fun CameraScreen(
                         }
                         // --- End Throttling ---
 
-                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees // Needed if rotation is handled manually
+                        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
 
                         // --- Image Conversion ---
                         val conversionStartTime = System.nanoTime()
-                        // IMPORTANT: ImageUtils converts YUV_420_888 to RGBA ByteArray
+                        // Need to keep imageProxy open until conversion is done inside the coroutine
+                        // Or convert here and pass bytes to coroutine. Convert here is simpler.
                         val rgbaBytes = ImageUtils.imageProxyToRgbaByteArray(imageProxy)
                         val conversionEndTime = System.nanoTime()
                         val conversionTimeMs = (conversionEndTime - conversionStartTime) / 1_000_000
 
-                        // Get dimensions *before* closing ImageProxy
                         val analysisWidth = imageProxy.width
                         val analysisHeight = imageProxy.height
 
-                        // CRUCIAL: Close the ImageProxy ASAP after getting data
-                        imageProxy.close()
+                        imageProxy.close() // Close ASAP after conversion
 
                         if (rgbaBytes != null) {
-                            // Update sourceSize only if it changes, reducing recompositions
-                            if (sourceSize.width != analysisWidth || sourceSize.height != analysisHeight) {
-                                sourceSize = Size(analysisWidth, analysisHeight)
-                                Log.d("CameraScreen", "Source size updated: ${sourceSize.width}x${sourceSize.height}")
-                            }
+                            // Launch detection in a coroutine
+                            scope.launch { // Use the composable's scope
+                                val detectStartTime = System.nanoTime()
+                                // Call the public suspend function that takes ByteArray
+                                val results: List<Detection>? = detector.detect(rgbaBytes, analysisWidth, analysisHeight)
+                                val detectEndTime = System.nanoTime()
+                                val detectTimeMs = (detectEndTime - detectStartTime) / 1_000_000
 
-                            // --- Perform Detection ---
-                            val detectStartTime = System.nanoTime()
-                            // Pass the RGBA byte array and original dimensions
-                            val results = detector.detect(rgbaBytes, analysisWidth, analysisHeight)
-                            val detectEndTime = System.nanoTime()
-                            val detectTimeMs = (detectEndTime - detectStartTime) / 1_000_000
+                                // Update state on the main thread
+                                withContext(Dispatchers.Main) {
+                                    if (sourceSize.width != analysisWidth || sourceSize.height != analysisHeight) {
+                                        sourceSize = Size(analysisWidth, analysisHeight)
+                                        Log.d("CameraScreen", "Source size updated: ${sourceSize.width}x${sourceSize.height}")
+                                    }
+                                    // Update detections state (triggers recomposition for overlay)
+                                    results?.let { detections = it }
 
-                            // Update detections state (triggers recomposition for overlay)
-                            detections = results
+                                    // --- Performance Logging & State Update (moved inside main thread update) ---
+                                    val frameEndTime = System.currentTimeMillis()
+                                    val totalFrameProcessingTime = frameEndTime - frameStartTime // Approx, includes coroutine launch overhead
+                                    lastProcessedFrameTimestamp.set(frameEndTime) // Update timestamp here
 
-                            // --- Performance Logging & State Update ---
-                            val frameEndTime = System.currentTimeMillis()
-                            val totalFrameProcessingTime = frameEndTime - frameStartTime
-                            lastProcessedFrameTimestamp.set(frameEndTime) // Use end time for next throttle check
+                                    frameProcessingTimes.add(totalFrameProcessingTime)
+                                    if (frameProcessingTimes.size > 10) frameProcessingTimes.removeAt(0)
+                                    processingTimeAvgMs.value = frameProcessingTimes.average().toFloat()
 
-                            // Update processing time average (e.g., over last 10 frames)
-                            frameProcessingTimes.add(totalFrameProcessingTime)
-                            if (frameProcessingTimes.size > 10) {
-                                frameProcessingTimes.removeAt(0)
-                            }
-                            processingTimeAvgMs.value = frameProcessingTimes.average().toFloat()
-
-                            // FPS calculation
-                            val currentFrameCount = frameCount.incrementAndGet()
-                            val elapsedFpsTime = frameEndTime - lastFpsUpdateTime
-                            if (elapsedFpsTime >= 1000) { // Update FPS display every second
-                                fps = (currentFrameCount * 1000f) / elapsedFpsTime
-                                frameCount.set(0) // Reset frame count for the next second
-                                lastFpsUpdateTime = frameEndTime
-                                Log.d("CameraScreen", "Perf Update: FPS=%.1f | Avg Proc Time=%.1f ms (Convert= %d ms, Detect= %d ms)".format(
-                                    fps, processingTimeAvgMs.value, conversionTimeMs, detectTimeMs))
-                            }
-
+                                    val currentFrameCount = frameCount.incrementAndGet()
+                                    val elapsedFpsTime = frameEndTime - lastFpsUpdateTime
+                                    if (elapsedFpsTime >= 1000) {
+                                        fps = (currentFrameCount * 1000f) / elapsedFpsTime
+                                        frameCount.set(0)
+                                        lastFpsUpdateTime = frameEndTime
+                                        Log.d("CameraScreen", "Perf Update: FPS=%.1f | Avg Proc Time=%.1f ms (Convert=%d ms, Detect=%d ms)".format(
+                                            fps, processingTimeAvgMs.value, conversionTimeMs, detectTimeMs))
+                                    }
+                                } // End withContext(Dispatchers.Main)
+                            } // End scope.launch
                         } else {
                             Log.e("CameraScreen", "Could not convert ImageProxy to RGBA ByteArray. Format: ${imageProxy.format}")
-                            // Close proxy here if not closed earlier in case of conversion failure
-                            // imageProxy.close() // Already closed above
+                            // Optionally clear detections if conversion fails (on main thread)
+                            scope.launch(Dispatchers.Main) { detections = emptyList() }
                         }
-                    }
+                    } // End setAnalyzer lambda
                 } else {
                     // If detector is not ready, ensure no analyzer is set
                     Log.w("CameraScreen", "Detector not ready, clearing analyzer.")
                     clearAnalyzer()
                 }
-            }
-    }
+            } // End apply
+    } // End remember for imageAnalyzer
 
     // LaunchedEffect for binding camera use cases
-    LaunchedEffect(cameraProviderFuture, preview, imageAnalyzer, isDetectorReady) { // Re-bind if analyzer or isDetectorReady changes
-        Log.d("CameraScreen", "LaunchedEffect for binding camera use cases triggered (isDetectorReady=$isDetectorReady).")
+    LaunchedEffect(cameraProviderFuture, preview, imageAnalyzer, initStatus) { // Re-bind if analyzer or initStatus changes
+        Log.d("CameraScreen", "LaunchedEffect for binding camera use cases triggered (InitStatus=$initStatus).")
         val cameraProvider = cameraProviderFuture.get()
         val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
         try {
-            // Unbind existing use cases before rebinding
             cameraProvider.unbindAll()
             Log.d("CameraScreen", "Unbound all use cases.")
 
-            // Bind the desired use cases
-            // Only bind imageAnalyzer if it has an analyzer set (i.e., detector is ready)
-            if (isDetectorReady) {
-                 Log.d("CameraScreen", "Binding Preview and ImageAnalysis.")
-                 cameraProvider.bindToLifecycle(
-                     lifecycleOwner, cameraSelector, preview, imageAnalyzer
-                 )
+            // Bind use cases based on detector readiness
+            val useCasesToBind = mutableListOf<UseCase>(preview)
+            if (initStatus == InitStatus.SUCCESS) {
+                useCasesToBind.add(imageAnalyzer)
+                Log.d("CameraScreen", "Binding Preview and ImageAnalysis.")
             } else {
-                 Log.d("CameraScreen", "Binding Preview only (detector not ready).")
-                 cameraProvider.bindToLifecycle(
-                     lifecycleOwner, cameraSelector, preview
-                 )
+                Log.d("CameraScreen", "Binding Preview only (detector not ready or failed).")
             }
+
+            cameraProvider.bindToLifecycle(
+                 lifecycleOwner, cameraSelector, *useCasesToBind.toTypedArray()
+            )
             Log.i("CameraScreen", "Camera use cases bound successfully.")
 
         } catch (exc: Exception) {
             Log.e("CameraScreen", "Use case binding failed", exc)
         }
-        // Return Unit explicitly or implicitly
     }
 
     Scaffold(
@@ -356,42 +380,57 @@ fun CameraScreen(
         Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             AndroidView({ previewView }, modifier = Modifier.fillMaxSize())
 
-            if (isDetectorReady) {
-                // Draw bounding boxes only if the detector is ready
-                BoundingBoxOverlay(
-                    detections = detections,
-                    sourceImageWidth = sourceSize.width, // Pass the original image width
-                    sourceImageHeight = sourceSize.height, // Pass the original image height
-                    modifier = Modifier.fillMaxSize()
-                )
-                // Display FPS and Avg Processing Time on top right
-                Column(modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = "FPS: ${"%.1f".format(fps)}",
-                        color = Color.White,
-                        fontSize = 14.sp
+            // Overlay content based on initialization status
+            when (initStatus) {
+                InitStatus.SUCCESS -> {
+                    // Draw bounding boxes only if the detector is ready
+                    BoundingBoxOverlay(
+                        detections = detections,
+                        sourceImageWidth = sourceSize.width,
+                        sourceImageHeight = sourceSize.height,
+                        modifier = Modifier.fillMaxSize()
                     )
-                    Text(
-                        text = "Proc: ${processingTimeAvgMs.value.roundToInt()} ms",
-                        color = Color.White,
-                        fontSize = 14.sp
-                    )
+                    // Display FPS and Avg Processing Time
+                    Column(modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("FPS: ${"%.1f".format(fps)}", color = Color.White, fontSize = 14.sp)
+                        Text("Proc: ${processingTimeAvgMs.value.roundToInt()} ms", color = Color.White, fontSize = 14.sp)
+                    }
                 }
-
-            } else {
-                // Show loading indicator or message while detector is initializing
-                Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    CircularProgressIndicator()
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Initializing Detector...")
+                InitStatus.PENDING -> {
+                    // Show loading indicator
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Initializing Detector...")
+                    }
+                }
+                InitStatus.FAILED -> {
+                    // Show error message
+                     Column(
+                        modifier = Modifier.align(Alignment.Center).padding(16.dp)
+                            .background(Color.Black.copy(alpha = 0.7f), MaterialTheme.shapes.medium)
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("Initialization Failed", color = Color.Red, style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(errorMessage ?: "An unknown error occurred.", color = Color.White, textAlign = TextAlign.Center)
+                        // Optionally add a retry button
+                        // Button(onClick = { /* Call initializeDetector() again */ }) { Text("Retry") }
+                    }
+                }
+                InitStatus.IDLE -> {
+                     // Show placeholder or message if needed (e.g., waiting for permission)
+                     // This state might not be visible for long if permission is granted quickly
+                     Text("Waiting for initialization...", modifier = Modifier.align(Alignment.Center))
                 }
             }
         }

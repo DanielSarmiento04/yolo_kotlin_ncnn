@@ -54,7 +54,7 @@ private val cocoClassNames = listOf(
 
 @Composable
 fun BoundingBoxOverlay(
-    detections: List<NcnnDetector.Detection>,
+    detections: List<Detection>, // Updated type to use the defined Detection data class
     sourceImageWidth: Int,
     sourceImageHeight: Int,
     modifier: Modifier = Modifier
