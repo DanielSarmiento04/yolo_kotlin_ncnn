@@ -195,6 +195,50 @@ static void nv21_to_rgb(const unsigned char* y_plane, const unsigned char* vu_pl
     }
 }
 
+// Manual Planar YUV 4:2:0 (like I420/YV12) to RGB conversion
+// Assumes separate Y, U, V planes.
+// y_plane: Pointer to the start of the Y data
+// u_plane: Pointer to the start of the U data
+// v_plane: Pointer to the start of the V data
+// rgb_output: Pointer to the output buffer (must be pre-allocated: width * height * 3 bytes)
+// width, height: Dimensions of the image
+// y_stride: Row stride of the Y plane
+// uv_stride: Row stride of the U and V planes (assumed to be the same)
+static void planar_yuv420_to_rgb(const unsigned char* y_plane, const unsigned char* u_plane, const unsigned char* v_plane,
+                                 unsigned char* rgb_output,
+                                 int width, int height, int y_stride, int uv_stride)
+{
+    for (int j = 0; j < height; ++j) {
+        const unsigned char* y_row = y_plane + j * y_stride;
+        // UV plane row index depends on Y row index (UV height is half of Y height)
+        // UV row stride is uv_stride
+        const unsigned char* u_row = u_plane + (j / 2) * uv_stride;
+        const unsigned char* v_row = v_plane + (j / 2) * uv_stride;
+
+        for (int i = 0; i < width; ++i) {
+            // Y value for pixel (i, j)
+            const int y_value = y_row[i];
+
+            // Calculate index for U and V values in their respective planes
+            // U/V values correspond to a 2x2 block of Y values
+            const int uv_col_index = i / 2;
+            const int u_value = u_row[uv_col_index] - 128; // U value for the 2x2 block
+            const int v_value = v_row[uv_col_index] - 128; // V value for the 2x2 block
+
+            // Calculate RGB values using standard conversion formula
+            int r = y_value + (int)(1.402f * v_value);
+            int g = y_value - (int)(0.344f * u_value + 0.714f * v_value);
+            int b = y_value + (int)(1.772f * u_value);
+
+            // Clamp values to [0, 255] and store in the output buffer (RGB order)
+            int output_index = (j * width + i) * 3;
+            rgb_output[output_index + 0] = clamp_u8(r); // R
+            rgb_output[output_index + 1] = clamp_u8(g); // G
+            rgb_output[output_index + 2] = clamp_u8(b); // B
+        }
+    }
+}
+
 extern "C"
 {
 
@@ -354,9 +398,9 @@ extern "C"
             LOGE("Detection failed: Invalid YUV input data provided.");
             return nullptr;
         }
-        // Check if the pixel stride indicates a format we can handle (NV21)
-        if (uvPixelStride != 2) {
-             LOGE("Detection failed: Unsupported uvPixelStride %d. Only NV21 (stride=2) is supported for manual conversion.", uvPixelStride);
+        // Check if the pixel stride is supported (1 for planar, 2 for semi-planar NV21)
+        if (uvPixelStride != 1 && uvPixelStride != 2) {
+             LOGE("Detection failed: Unsupported uvPixelStride %d. Only 1 (planar) or 2 (NV21 semi-planar) is supported for manual conversion.", uvPixelStride);
              return nullptr;
         }
 
@@ -365,25 +409,36 @@ extern "C"
 
         // 1. Get direct buffer access to YUV planes
         unsigned char *y_pixel_data = (unsigned char *)env->GetDirectBufferAddress(yBuffer);
-        // For NV21, the V/U plane starts at the V buffer address. U buffer might be same or different but isn't needed directly by nv21_to_rgb.
-        unsigned char *vu_pixel_data = (unsigned char *)env->GetDirectBufferAddress(vBuffer);
+        unsigned char *u_pixel_data = (unsigned char *)env->GetDirectBufferAddress(uBuffer); // Needed for planar
+        unsigned char *v_pixel_data = (unsigned char *)env->GetDirectBufferAddress(vBuffer); // Needed for planar (or start of VU for NV21)
 
         // Sanity check pointers
-        if (y_pixel_data == nullptr || vu_pixel_data == nullptr) {
-            LOGE("Failed to get direct buffer address for Y or VU planes. Ensure buffers are direct.");
+        if (y_pixel_data == nullptr || u_pixel_data == nullptr || v_pixel_data == nullptr) {
+            // Check all pointers now as planar needs U separately
+            LOGE("Failed to get direct buffer address for Y, U, or V planes. Ensure buffers are direct.");
             return nullptr;
         }
 
         // --- Preprocessing Timing Start ---
         auto preprocess_start_time = std::chrono::high_resolution_clock::now();
 
-        // 2. Preprocessing: Manually convert YUV (NV21) to RGB, then create ncnn::Mat
+        // 2. Preprocessing: Manually convert YUV to RGB based on pixel stride, then create ncnn::Mat
         ncnn::Mat input_img;
         std::vector<unsigned char> rgb_buffer(imageWidth * imageHeight * 3); // Allocate buffer for RGB data
 
-        // Perform manual conversion
-        nv21_to_rgb(y_pixel_data, vu_pixel_data, rgb_buffer.data(),
-                    imageWidth, imageHeight, yStride, uvStride, uvPixelStride);
+        // Perform manual conversion based on uvPixelStride
+        if (uvPixelStride == 2) {
+            // Use NV21 conversion (semi-planar)
+            LOGD("Using NV21 (uvPixelStride=2) conversion.");
+            // Pass V pointer as the start of the VU plane
+            nv21_to_rgb(y_pixel_data, v_pixel_data, rgb_buffer.data(),
+                        imageWidth, imageHeight, yStride, uvStride, uvPixelStride);
+        } else { // uvPixelStride == 1
+            // Use Planar conversion
+            LOGD("Using Planar YUV (uvPixelStride=1) conversion.");
+            planar_yuv420_to_rgb(y_pixel_data, u_pixel_data, v_pixel_data, rgb_buffer.data(),
+                                 imageWidth, imageHeight, yStride, uvStride);
+        }
 
         // Create ncnn::Mat from the converted RGB buffer
         // Use from_pixels_resize to handle potential resizing and letterboxing to model input size
@@ -411,8 +466,10 @@ extern "C"
 
         // 3. NCNN Inference
         ncnn::Mat out;
-        const char *input_name = "images";
-        const char *output_name = "output0";
+        // --- Set input name based on .param file ---
+        const char *input_name = "in0"; // Corrected based on .param file and NCNN log
+        // --- Verify output name based on .param file ---
+        const char *output_name = "out0"; // Check last layer in .param file (seems correct)
         std::chrono::microseconds inference_duration(0);
 
         { // Scope for extractor and mutex lock
@@ -425,15 +482,19 @@ extern "C"
 
             auto inference_start_time = std::chrono::high_resolution_clock::now();
 
+            // Use the corrected input_name here
             int input_ret = ex.input(input_name, input_img);
             if (input_ret != 0) {
-                LOGE("Failed to set input tensor. Error: %d. Check .param file.", input_ret);
+                // Log the name being used for easier debugging
+                LOGE("Failed to set input tensor with name '%s'. Error: %d. Check .param file.", input_name, input_ret);
                 return nullptr;
             }
 
+            // Use the potentially updated output_name here
             int extract_ret = ex.extract(output_name, out);
             if (extract_ret != 0) {
-                LOGE("Failed to extract output tensor. Error: %d. Check .param file.", extract_ret);
+                 // Log the name being used for easier debugging
+                LOGE("Failed to extract output tensor with name '%s'. Error: %d. Check .param file.", output_name, extract_ret);
                 return nullptr;
             }
 
