@@ -39,11 +39,9 @@ const int YOLOV11_INPUT_WIDTH = 640;
 const int YOLOV11_INPUT_HEIGHT = 640;
 // Use thresholds consistent with Kotlin side or typical values
 const float NMS_THRESHOLD = 0.45f;        // Non-Maximum Suppression threshold
-// CONFIDENCE_THRESHOLD now applies directly to the max class score
+// *** RESTORE ORIGINAL CONFIDENCE THRESHOLD ***
 const float CONFIDENCE_THRESHOLD = 0.25f;
-// CLASS_SCORE_THRESHOLD might be redundant if CONFIDENCE_THRESHOLD serves the purpose,
-// but keep it for potential future use or set it equal to CONFIDENCE_THRESHOLD.
-const float CLASS_SCORE_THRESHOLD = 0.25f; // Can be adjusted or removed if redundant
+const float CLASS_SCORE_THRESHOLD = 0.25f; // Restore matching threshold
 const int NUM_CLASSES = 84;               // Number of classes the model can detect (updated to 84)
 
 // Structure to hold detection results internally before NMS
@@ -468,7 +466,9 @@ extern "C"
         // --- Postprocessing Timing Start ---
         auto postprocess_start_time = std::chrono::high_resolution_clock::now();
 
+        // *** RESTORED proposals vector ***
         std::vector<Object> proposals;
+        std::vector<Object> raw_objects; // Keep storing raw objects before NMS
 
         // --- Adjust Dimension Check ---
         // Allow Dims=2 (common format [num_proposals, num_features])
@@ -492,7 +492,6 @@ extern "C"
              LOGD("Output tensor dims=3, C=1. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
         }
         // --- End Dimension Check Adjustment ---
-
 
         // *** UPDATED EXPECTED FEATURES CALCULATION ***
         int expected_features = 4 + NUM_CLASSES; // cx, cy, w, h, class_scores...
@@ -527,12 +526,14 @@ extern "C"
         float pad_left = (YOLOV11_INPUT_WIDTH - imageWidth * scale) / 2.0f;
         float pad_top = (YOLOV11_INPUT_HEIGHT - imageHeight * scale) / 2.0f;
 
-        std::vector<Object> raw_objects;
-        raw_objects.reserve(num_proposals / 10);
+        raw_objects.reserve(num_proposals / 10); // Reserve space
 
         const float *data = (const float *)out.data;
 
-        // *** UPDATED POST-PROCESSING LOOP ***
+        // *** UPDATED POST-PROCESSING LOOP with RAW LOGIT LOGGING ***
+        int proposal_log_counter = 0; // Counter for limiting proposal logs
+        const int MAX_PROPOSAL_LOGS = 5; // Log logits for first few proposals
+
         for (int i = 0; i < num_proposals; ++i)
         {
             // Data layout assumed: [cx, cy, w, h, class0_logit, class1_logit, ...]
@@ -542,13 +543,20 @@ extern "C"
             int best_class_idx = -1;
             float max_class_score_prob = -1.0f; // Store max probability
 
-            // Class scores start at index 4 in this format
             const float *class_scores_ptr = proposal_data + 4;
 
             for (int c = 0; c < NUM_CLASSES; ++c)
             {
-                // Apply sigmoid to class score logit
                 float class_score_logit = class_scores_ptr[c];
+
+                // *** ADDED RAW LOGIT LOGGING (Limited) ***
+                if (proposal_log_counter < MAX_PROPOSAL_LOGS && c < 5) { // Log first 5 classes for first 5 proposals
+                     LOGD("Proposal %d, Class %d: Raw Logit = %.4f", i, c, class_score_logit);
+                } else if (proposal_log_counter < MAX_PROPOSAL_LOGS && class_score_logit > 10.0f) { // Log if logit is unusually high
+                     LOGD("Proposal %d, Class %d: High Raw Logit = %.4f", i, c, class_score_logit);
+                }
+                // *** END RAW LOGIT LOGGING ***
+
                 float class_score_prob = sigmoid(class_score_logit);
 
                 if (class_score_prob > max_class_score_prob)
@@ -557,8 +565,13 @@ extern "C"
                     best_class_idx = c;
                 }
             }
+             // Increment proposal log counter after processing all classes for one proposal
+            if (i < MAX_PROPOSAL_LOGS) {
+                proposal_log_counter++;
+            }
 
-            // Check if the highest class score meets the confidence threshold
+
+            // Check if the highest class score meets the (restored) confidence threshold
             if (max_class_score_prob >= CONFIDENCE_THRESHOLD)
             {
                 // Extract bounding box coordinates (center x, center y, width, height)
@@ -592,9 +605,8 @@ extern "C"
                     obj.w = w_orig;
                     obj.h = h_orig;
                     obj.label = best_class_idx;
-                    // Final probability is the max class score probability
                     obj.prob = max_class_score_prob;
-                    raw_objects.push_back(obj);
+                    raw_objects.push_back(obj); // Add to raw_objects
                 }
             }
         }
@@ -603,7 +615,7 @@ extern "C"
         std::sort(raw_objects.begin(), raw_objects.end(), [](const Object &a, const Object &b)
                   { return a.prob > b.prob; });
 
-        // Apply Non-Maximum Suppression (NMS)
+        // *** RESTORED NMS ***
         std::vector<int> picked_indices;
         nms_sorted_bboxes(raw_objects, picked_indices, NMS_THRESHOLD);
 
@@ -620,13 +632,16 @@ extern "C"
                 LOGW("Invalid index %d from NMS, skipping.", index);
             }
         }
+        // *** END RESTORED NMS ***
+
 
         // --- Postprocessing Timing End ---
         auto postprocess_end_time = std::chrono::high_resolution_clock::now();
         auto postprocess_duration = std::chrono::duration_cast<std::chrono::microseconds>(postprocess_end_time - postprocess_start_time);
 
         // 5. Format results for Java/Kotlin
-        int final_count = proposals.size();
+        // *** USE proposals (after NMS) FOR FINAL RESULT ***
+        int final_count = proposals.size(); // Use size of proposals
         int result_elements = 1 + final_count * 6;
         jfloatArray resultArray = env->NewFloatArray(result_elements);
         if (resultArray == nullptr)
@@ -640,7 +655,8 @@ extern "C"
 
         for (int i = 0; i < final_count; ++i)
         {
-            const Object &obj = proposals[i];
+            // *** USE proposals (after NMS) FOR FINAL RESULT ***
+            const Object &obj = proposals[i]; // Use proposals
             int offset = 1 + i * 6;
             resultData[offset + 0] = obj.x;
             resultData[offset + 1] = obj.y;
