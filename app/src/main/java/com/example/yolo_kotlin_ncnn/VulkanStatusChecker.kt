@@ -19,9 +19,9 @@ import androidx.compose.ui.unit.dp
 
 @Composable
 fun VulkanStatusChecker(
-    isInitialized: Boolean,
-    isModelLoaded: Boolean,
-    hasVulkan: Boolean,
+    isInitialized: Boolean, // Flag indicating if NCNN init succeeded
+    isModelLoaded: Boolean, // Flag indicating if model load succeeded
+    hasVulkan: Boolean,     // Flag indicating if Vulkan is active
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -33,28 +33,36 @@ fun VulkanStatusChecker(
                 text = "NCNN Status",
                 style = MaterialTheme.typography.headlineSmall
             )
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
+            // Use the passed flags directly
             StatusItem(
                 title = "Initialization",
                 isSuccess = isInitialized,
                 details = if (isInitialized) "NCNN initialized correctly" else "Failed to initialize NCNN"
             )
-            
+
             StatusItem(
                 title = "Model Loading",
-                isSuccess = isModelLoaded,
-                details = if (isModelLoaded) "YOLOv5 model loaded" else "Model not loaded"
+                // Model can only be loaded if initialized
+                isSuccess = isInitialized && isModelLoaded,
+                details = when {
+                    !isInitialized -> "Waiting for initialization"
+                    isModelLoaded -> "YOLOv11 model loaded"
+                    else -> "Model not loaded"
+                }
             )
-            
+
             StatusItem(
                 title = "Vulkan Support",
-                isSuccess = hasVulkan,
-                details = if (hasVulkan) 
-                    "Hardware acceleration available" 
-                else 
-                    "Using CPU fallback (Vulkan not available)"
+                // Vulkan status is only relevant if initialized
+                isSuccess = isInitialized && hasVulkan,
+                details = when {
+                    !isInitialized -> "Waiting for initialization"
+                    hasVulkan -> "Hardware acceleration available (GPU)"
+                    else -> "Using CPU fallback (Vulkan not available/enabled)"
+                }
             )
         }
     }

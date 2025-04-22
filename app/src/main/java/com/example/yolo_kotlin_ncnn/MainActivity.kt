@@ -53,7 +53,6 @@ class MainActivity : ComponentActivity() {
 
     // State for initialization status, using mutableStateOf for Compose reactivity
     private val initializationStatus = mutableStateOf(InitStatus.IDLE)
-    private var isVulkanUsed = false // Store whether Vulkan is active
     private var initErrorMessage = mutableStateOf<String?>(null) // Store error message
 
     // Permission handling
@@ -110,8 +109,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val initOk = detector.init()
                 if (initOk) {
-                    isVulkanUsed = detector.isVulkanSupported() // Check Vulkan status after init
-                    Log.i(TAG, "Detector init successful. Loading model... (Vulkan: $isVulkanUsed)")
+                    Log.i(TAG, "Detector init successful. Loading model... (Vulkan: ${detector.hasVulkanGpu})")
                     val modelOk = detector.loadModel()
                     if (modelOk) {
                         Log.i(TAG, "Model load successful.")
@@ -164,7 +162,9 @@ class MainActivity : ComponentActivity() {
                         detector = detector,
                         cameraExecutor = cameraExecutor,
                         initStatus = initializationStatus.value, // Pass the current status enum
-                        isVulkanUsed = isVulkanUsed, // Pass Vulkan status
+                        isNcnnInitialized = detector.isInitialized,
+                        isModelLoaded = detector.isModelLoaded,
+                        isVulkanUsed = detector.hasVulkanGpu,
                         errorMessage = initErrorMessage.value // Pass error message
                     )
                 } else {
@@ -226,7 +226,9 @@ internal fun CameraScreen( // Changed visibility to internal
     detector: NcnnDetector,
     cameraExecutor: ExecutorService,
     initStatus: InitStatus, // Receive the initialization status
-    isVulkanUsed: Boolean,    // Receive Vulkan status
+    isNcnnInitialized: Boolean,
+    isModelLoaded: Boolean,
+    isVulkanUsed: Boolean,
     errorMessage: String?     // Receive potential error message
 ) {
     val isDetectorReady = initStatus == InitStatus.SUCCESS // Derived state

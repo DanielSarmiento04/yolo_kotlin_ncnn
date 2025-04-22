@@ -37,6 +37,7 @@ private fun getColorForClass(classId: Int): Color {
 
 // COCO class names + Custom Classes (ensure this matches the NUM_CLASSES in native-lib.cpp)
 // Verify this list matches the classes your specific YOLOv11 model was trained on.
+// *** Updated to 84 classes to match native code and model metadata ***
 private val cocoClassNames = listOf(
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
     "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
@@ -48,9 +49,9 @@ private val cocoClassNames = listOf(
     "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
     "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
     "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush", // 80 classes for standard COCO
-    // Custom classes from model.yml (indices 80-83)
-    "pump", "pipe", "steel pipe", "electric cable"
-) // Total 84 classes
+    // Custom classes from model.yml (indices 80-83) - Ensure these match your model training
+    "pump", "pipe", "steel pipe", "electric cable" // Total 84 classes
+)
 
 @Composable
 fun BoundingBoxOverlay(

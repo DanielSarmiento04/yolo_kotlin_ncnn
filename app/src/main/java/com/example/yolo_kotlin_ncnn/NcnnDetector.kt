@@ -36,9 +36,13 @@ class NcnnDetector(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
     private val assetManager: AssetManager = context.assets
-    private var isInitialized = false
-    private var isModelLoaded = false
-    private var hasVulkanGpu = false
+    // Make status flags publicly readable
+    var isInitialized: Boolean = false
+        private set // Allow reading from outside, but only set internally
+    var isModelLoaded: Boolean = false
+        private set
+    var hasVulkanGpu: Boolean = false
+        private set
 
     init {
         try {
@@ -64,10 +68,11 @@ class NcnnDetector(
         }
         isInitialized = initNative(assetManager)
         if (isInitialized) {
-            hasVulkanGpu = hasVulkan()
+            hasVulkanGpu = hasVulkan() // Check Vulkan status via JNI
             Log.i(TAG, "NCNN initialized successfully. Vulkan GPU available: $hasVulkanGpu")
         } else {
             Log.e(TAG, "NCNN initialization failed.")
+            hasVulkanGpu = false // Ensure flag is false on failure
         }
         isInitialized
     }
@@ -87,7 +92,7 @@ class NcnnDetector(
             Log.i(TAG, "Model already loaded.")
             return@withContext true
         }
-        isModelLoaded = loadModel(assetManager)
+        isModelLoaded = loadModelNative(assetManager)
         if (isModelLoaded) {
             Log.i(TAG, "YOLOv11 model loaded successfully.")
         } else {
@@ -99,10 +104,12 @@ class NcnnDetector(
     /**
      * Checks if Vulkan GPU is being used by the detector.
      * Requires `init()` to have been called.
+     * This now directly returns the internal flag set during init.
      *
      * @return True if Vulkan is initialized and used, false otherwise.
      */
     fun isVulkanSupported(): Boolean {
+        // Return the flag set during init()
         return isInitialized && hasVulkanGpu
     }
 
@@ -129,14 +136,16 @@ class NcnnDetector(
             Log.e(TAG, "Cannot detect: NCNN not initialized or model not loaded.")
             return@withContext null
         }
-        if (yBuffer == null || uBuffer == null || vBuffer == null || width <= 0 || height <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0) {
-            Log.e(TAG, "Cannot detect: Invalid YUV input data.")
+        if (yBuffer == null || !yBuffer.isDirect ||
+            uBuffer == null || !uBuffer.isDirect ||
+            vBuffer == null || !vBuffer.isDirect ||
+            width <= 0 || height <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0) {
+            Log.e(TAG, "Cannot detect: Invalid or non-direct YUV input data/params.")
             return@withContext null
         }
 
         // 1. Call native detect function with YUV data
         val startTime = System.currentTimeMillis()
-        // Ensure buffers are direct or have backing arrays accessible by JNI
         val results: FloatArray? = detectNative(
             yBuffer, uBuffer, vBuffer,
             yStride, uvStride, uvPixelStride,
@@ -160,18 +169,22 @@ class NcnnDetector(
         }
         if (results.isEmpty()) {
             Log.w(TAG, "Detection returned empty results array.")
-            return emptyList() // No error, but no results
+            return emptyList()
         }
 
         val count = results[0].toInt()
-        if (count <= 0) {
-            return emptyList() // Valid result, just no detections
+        if (count < 0) {
+            Log.e(TAG, "Detection failed: Native function returned negative count ($count).")
+            return null
+        }
+        if (count == 0) {
+            return emptyList()
         }
 
         val expectedSize = 1 + count * 6
         if (results.size != expectedSize) {
             Log.e(TAG, "Result array size mismatch. Expected: $expectedSize, Got: ${results.size}")
-            return null // Corrupted results
+            return null
         }
 
         val detections = mutableListOf<Detection>()
@@ -185,22 +198,21 @@ class NcnnDetector(
                 val label = results[offset + 4].toInt()
                 val score = results[offset + 5]
 
-                // Basic validation
-                if (x < 0f || y < 0f || w <= 0f || h <= 0f || label < 0 || score < 0f || score > 1f) {
-                     Log.w(TAG, "Skipping invalid detection data at index $i: [x=$x, y=$y, w=$w, h=$h, label=$label, score=$score]")
-                     continue
+                if (w <= 0f || h <= 0f || label < 0 || score < 0f || score > 1f) {
+                    Log.w(TAG, "Skipping invalid detection data at index $i: [x=$x, y=$y, w=$w, h=$h, label=$label, score=$score]")
+                    continue
                 }
 
                 detections.add(
                     Detection(
                         label = label,
                         confidence = score,
-                        rect = RectF(x, y, x + w, y + h) // Create RectF from x, y, w, h
+                        rect = RectF(x, y, x + w, y + h)
                     )
                 )
             } catch (e: ArrayIndexOutOfBoundsException) {
                 Log.e(TAG, "Error parsing detection results at index $i. Array index out of bounds.", e)
-                return null // Indicate failure due to parsing error
+                return null
             }
         }
         Log.i(TAG, "Successfully parsed $count detections.")
@@ -212,9 +224,10 @@ class NcnnDetector(
      * Should be called when the detector is no longer needed (e.g., in onDestroy).
      */
     fun release() {
-        if (isInitialized) {
+        if (isInitialized) { // Check the flag before calling native
             releaseNative()
-            Log.i(TAG, "NCNN resources released.")
+            Log.i(TAG, "NCNN resources released via native call.")
+            // Reset flags after successful release
             isInitialized = false
             isModelLoaded = false
             hasVulkanGpu = false
@@ -229,7 +242,7 @@ class NcnnDetector(
     private external fun initNative(assetManager: AssetManager): Boolean
 
     /** Loads the NCNN model files. */
-    private external fun loadModel(assetManager: AssetManager): Boolean
+    private external fun loadModelNative(assetManager: AssetManager): Boolean
 
     /** Checks if Vulkan GPU is being used. */
     private external fun hasVulkan(): Boolean

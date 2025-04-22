@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <algorithm> // For std::max, std::min, std::sort
-#include <cmath>     // Use cmath instead of math.h for C++ style
+#include <cmath>     // Use cmath instead of math.h for C++ style, needed for expf
 #include <numeric>   // For std::iota
 #include <chrono>    // For timing
 #include <thread>    // For std::thread::hardware_concurrency
@@ -32,14 +32,19 @@ static bool ncnnInitialized = false;
 static bool modelLoaded = false;
 static bool useGPU = false;     // Whether Vulkan will be used
 static int gpuDeviceIndex = -1; // Store selected GPU device index
+static bool gpuInstanceCreated = false; // Track if create_gpu_instance was called
 
 // YOLOv11 constants (ADJUST THESE BASED ON YOUR SPECIFIC YOLOv11 MODEL)
 const int YOLOV11_INPUT_WIDTH = 640;
 const int YOLOV11_INPUT_HEIGHT = 640;
 // Use thresholds consistent with Kotlin side or typical values
 const float NMS_THRESHOLD = 0.45f;        // Non-Maximum Suppression threshold
-const float CONFIDENCE_THRESHOLD = 0.25f; // Minimum confidence score to consider a detection
-const int NUM_CLASSES = 84;               // Number of classes the model can detect (e.g., COCO dataset has 80, adjust if needed)
+// CONFIDENCE_THRESHOLD now applies directly to the max class score
+const float CONFIDENCE_THRESHOLD = 0.25f;
+// CLASS_SCORE_THRESHOLD might be redundant if CONFIDENCE_THRESHOLD serves the purpose,
+// but keep it for potential future use or set it equal to CONFIDENCE_THRESHOLD.
+const float CLASS_SCORE_THRESHOLD = 0.25f; // Can be adjusted or removed if redundant
+const int NUM_CLASSES = 84;               // Number of classes the model can detect (updated to 84)
 
 // Structure to hold detection results internally before NMS
 struct Object
@@ -150,7 +155,7 @@ static inline unsigned char clamp_u8(int value)
 // Manual YUV420SP (NV21) to RGB conversion
 // Assumes NV21 format: Y plane followed by an interleaved V/U plane (VUVUVU...)
 // y_plane: Pointer to the start of the Y data
-// vu_plane: Pointer to the start of the interleaved V/U data
+// vu_plane: Pointer to the start of the interleaved V/U data (points to the first V)
 // rgb_output: Pointer to the output buffer (must be pre-allocated: width * height * 3 bytes)
 // width, height: Dimensions of the image
 // y_stride: Row stride of the Y plane
@@ -160,10 +165,10 @@ static void nv21_to_rgb(const unsigned char *y_plane, const unsigned char *vu_pl
                         unsigned char *rgb_output,
                         int width, int height, int y_stride, int uv_stride, int uv_pixel_stride)
 {
+    // Basic check for NV21 compatibility
     if (uv_pixel_stride != 2)
     {
-        LOGE("nv21_to_rgb: Expected uv_pixel_stride of 2 for NV21 format, got %d", uv_pixel_stride);
-        // Optionally fill output with black or handle error differently
+        LOGE("nv21_to_rgb: Expected uv_pixel_stride of 2 for NV21 format, got %d. Filling output with black.", uv_pixel_stride);
         std::fill(rgb_output, rgb_output + width * height * 3, 0);
         return;
     }
@@ -181,13 +186,13 @@ static void nv21_to_rgb(const unsigned char *y_plane, const unsigned char *vu_pl
             const int y_value = y_row[i];
 
             // Calculate index for V and U values in the interleaved UV plane
-            // V is at uv_row[ (i/2) * 2 ], U is at uv_row[ (i/2) * 2 + 1 ]
+            // For NV21 (VUVUVU): V is at uv_row[ (i/2) * 2 ], U is at uv_row[ (i/2) * 2 + 1 ]
             const int uv_index = (i / 2) * uv_pixel_stride; // uv_pixel_stride is 2
             const int v_value = uv_row[uv_index] - 128;     // V value for the 2x2 block
             const int u_value = uv_row[uv_index + 1] - 128; // U value for the 2x2 block
 
             // Calculate RGB values using standard conversion formula
-            // These formulas can vary slightly, ensure they match expectations if possible.
+            // These formulas can vary slightly.
             int r = y_value + (int)(1.402f * v_value);
             int g = y_value - (int)(0.344f * u_value + 0.714f * v_value);
             int b = y_value + (int)(1.772f * u_value);
@@ -201,50 +206,11 @@ static void nv21_to_rgb(const unsigned char *y_plane, const unsigned char *vu_pl
     }
 }
 
-// Manual Planar YUV 4:2:0 (like I420/YV12) to RGB conversion
-// Assumes separate Y, U, V planes.
-// y_plane: Pointer to the start of the Y data
-// u_plane: Pointer to the start of the U data
-// v_plane: Pointer to the start of the V data
-// rgb_output: Pointer to the output buffer (must be pre-allocated: width * height * 3 bytes)
-// width, height: Dimensions of the image
-// y_stride: Row stride of the Y plane
-// uv_stride: Row stride of the U and V planes (assumed to be the same)
-static void planar_yuv420_to_rgb(const unsigned char *y_plane, const unsigned char *u_plane, const unsigned char *v_plane,
-                                 unsigned char *rgb_output,
-                                 int width, int height, int y_stride, int uv_stride)
+// Sigmoid activation function
+static inline float sigmoid(float x)
 {
-    for (int j = 0; j < height; ++j)
-    {
-        const unsigned char *y_row = y_plane + j * y_stride;
-        // UV plane row index depends on Y row index (UV height is half of Y height)
-        // UV row stride is uv_stride
-        const unsigned char *u_row = u_plane + (j / 2) * uv_stride;
-        const unsigned char *v_row = v_plane + (j / 2) * uv_stride;
-
-        for (int i = 0; i < width; ++i)
-        {
-            // Y value for pixel (i, j)
-            const int y_value = y_row[i];
-
-            // Calculate index for U and V values in their respective planes
-            // U/V values correspond to a 2x2 block of Y values
-            const int uv_col_index = i / 2;
-            const int u_value = u_row[uv_col_index] - 128; // U value for the 2x2 block
-            const int v_value = v_row[uv_col_index] - 128; // V value for the 2x2 block
-
-            // Calculate RGB values using standard conversion formula
-            int r = y_value + (int)(1.402f * v_value);
-            int g = y_value - (int)(0.344f * u_value + 0.714f * v_value);
-            int b = y_value + (int)(1.772f * u_value);
-
-            // Clamp values to [0, 255] and store in the output buffer (RGB order)
-            int output_index = (j * width + i) * 3;
-            rgb_output[output_index + 0] = clamp_u8(r); // R
-            rgb_output[output_index + 1] = clamp_u8(g); // G
-            rgb_output[output_index + 2] = clamp_u8(b); // B
-        }
-    }
+    // Use expf for float version of exp
+    return 1.0f / (1.0f + expf(-x));
 }
 
 extern "C"
@@ -254,7 +220,6 @@ extern "C"
     JNIEXPORT jboolean JNICALL
     Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_initNative(JNIEnv *env, jobject /* this */, jobject assetManager)
     {
-        // Use Mutex Lock Guard for thread safety during initialization
         ncnn::MutexLockGuard guard(yoloNetLock);
 
         if (ncnnInitialized)
@@ -265,27 +230,32 @@ extern "C"
         LOGI("Initializing NCNN for YOLOv11...");
         auto init_start_time = std::chrono::high_resolution_clock::now();
 
-        // Get AAssetManager - needed for model loading later, but good practice to get early
+        // Get AAssetManager - needed for model loading later
         AAssetManager *mgr = AAssetManager_fromJava(env, assetManager);
         if (mgr == nullptr)
         {
             LOGE("Failed to get AAssetManager from Java context.");
-            // Although not strictly needed for init itself, failure here suggests context issues.
-            // Depending on app structure, might want to return false or proceed cautiously.
         }
 
         // Check Vulkan support
         int gpu_count = ncnn::get_gpu_count();
         if (gpu_count > 0)
         {
-            // Select the default GPU (device 0)
-            gpuDeviceIndex = ncnn::get_default_gpu_index(); // Use default GPU index provided by NCNN
+            gpuDeviceIndex = ncnn::get_default_gpu_index();
             useGPU = true;
             LOGI("Vulkan GPU detected. Count: %d. Selected device index: %d. Enabling GPU acceleration.", gpu_count, gpuDeviceIndex);
 
-            // Initialize Vulkan instance. This MUST happen before setting GPU options in the Net.
-            // It's safe to call multiple times, but typically done once at init.
-            ncnn::create_gpu_instance();
+            // Create GPU instance *once* during initialization
+            if (!gpuInstanceCreated)
+            {
+                ncnn::create_gpu_instance();
+                gpuInstanceCreated = true; // Mark as created
+                LOGI("NCNN Vulkan GPU instance created.");
+            }
+            else
+            {
+                LOGI("NCNN Vulkan GPU instance already exists.");
+            }
         }
         else
         {
@@ -294,17 +264,16 @@ extern "C"
             LOGW("No Vulkan capable GPU detected or NCNN not built with Vulkan support. Using CPU.");
         }
 
-        // Configure NCNN Net options for performance
-        yoloNet.opt = ncnn::Option();                                                    // Start with default options
-        yoloNet.opt.lightmode = true;                                                    // Enable light mode (reduces memory, might slightly impact speed)
-        yoloNet.opt.num_threads = std::min(4, (int)std::thread::hardware_concurrency()); // Use up to 4 threads or max available if less
-        yoloNet.opt.use_packing_layout = true;                                           // Highly recommended for performance on ARM CPU/GPU
-        yoloNet.opt.use_fp16_packed = useGPU;                                            // Use FP16 packed format on GPU if available (good balance)
-        yoloNet.opt.use_fp16_storage = useGPU;                                           // Store weights in FP16 on GPU if available (reduces memory)
-        yoloNet.opt.use_fp16_arithmetic = false;                                         // Use FP16 compute. Set to true ONLY if precision loss is acceptable and provides speedup. Often slower or similar speed but less precise. Test carefully. Defaulting to false is safer.
-        yoloNet.opt.use_vulkan_compute = useGPU;                                         // Explicitly enable Vulkan compute if GPU is available
+        // Configure NCNN Net options
+        yoloNet.opt = ncnn::Option();
+        yoloNet.opt.lightmode = true;
+        yoloNet.opt.num_threads = std::min(4, (int)std::thread::hardware_concurrency());
+        yoloNet.opt.use_packing_layout = true; // Essential for performance
+        yoloNet.opt.use_fp16_packed = useGPU;  // Use FP16 packed on GPU
+        yoloNet.opt.use_fp16_storage = useGPU; // Store weights in FP16 on GPU
+        yoloNet.opt.use_fp16_arithmetic = false; // Usually false is safer/faster unless tested
+        yoloNet.opt.use_vulkan_compute = useGPU; // Enable Vulkan
 
-        // Set the selected GPU device for the network instance
         if (useGPU)
         {
             yoloNet.set_vulkan_device(gpuDeviceIndex);
@@ -316,7 +285,7 @@ extern "C"
         }
 
         ncnnInitialized = true;
-        modelLoaded = false; // Ensure model is marked as not loaded yet
+        modelLoaded = false;
         auto init_end_time = std::chrono::high_resolution_clock::now();
         auto init_duration = std::chrono::duration_cast<std::chrono::milliseconds>(init_end_time - init_start_time);
         LOGI("NCNN initialization complete (took %lld ms). Vulkan enabled: %s", init_duration.count(), useGPU ? "true" : "false");
@@ -325,9 +294,8 @@ extern "C"
 
     // JNI Function: Load the YOLO model parameters and binary weights.
     JNIEXPORT jboolean JNICALL
-    Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_loadModel(JNIEnv *env, jobject /* this */, jobject assetManager)
+    Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_loadModelNative(JNIEnv *env, jobject /* this */, jobject assetManager)
     {
-        // Use Mutex Lock Guard for thread safety during model loading
         ncnn::MutexLockGuard guard(yoloNetLock);
 
         if (!ncnnInitialized)
@@ -343,7 +311,6 @@ extern "C"
         LOGI("Loading YOLOv11 model...");
         auto load_start_time = std::chrono::high_resolution_clock::now();
 
-        // Get AAssetManager
         AAssetManager *mgr = AAssetManager_fromJava(env, assetManager);
         if (mgr == nullptr)
         {
@@ -352,27 +319,23 @@ extern "C"
         }
 
         // *** ADJUST THESE FILENAMES TO MATCH YOUR YOLOv11 NCNN MODEL FILES ***
-        // Ensure these files exist in your app's `src/main/assets` folder
-        const char *param_filename = "yolov11.param"; // Example filename
-        const char *bin_filename = "yolov11.bin";     // Example filename
+        const char *param_filename = "yolov11.param";
+        const char *bin_filename = "yolov11.bin";
 
-        // Load model parameters (.param file) using the asset manager
-        // The second argument 'true' indicates path is relative within assets
+        // Load model parameters
         int ret_param = yoloNet.load_param(mgr, param_filename);
         if (ret_param != 0)
         {
-            LOGE("Failed to load model param file: %s (Error code: %d). Check if file exists in assets.", param_filename, ret_param);
-            // No need to clear here, as nothing was loaded successfully yet.
+            LOGE("Failed to load model param file: %s (Error code: %d). Check assets.", param_filename, ret_param);
             return JNI_FALSE;
         }
         LOGD("Loaded model param: %s", param_filename);
 
-        // Load model weights (.bin file) using the asset manager
+        // Load model weights
         int ret_bin = yoloNet.load_model(mgr, bin_filename);
         if (ret_bin != 0)
         {
-            LOGE("Failed to load model bin file: %s (Error code: %d). Check if file exists in assets.", bin_filename, ret_bin);
-            // If bin loading fails after param loading succeeded, clear the net to be safe.
+            LOGE("Failed to load model bin file: %s (Error code: %d). Check assets.", bin_filename, ret_bin);
             yoloNet.clear(); // Clear partially loaded state
             return JNI_FALSE;
         }
@@ -381,7 +344,7 @@ extern "C"
         modelLoaded = true;
         auto load_end_time = std::chrono::high_resolution_clock::now();
         auto load_duration = std::chrono::duration_cast<std::chrono::milliseconds>(load_end_time - load_start_time);
-        LOGI("YOLOv11 model loading complete (took %lld ms). Model is ready for inference.", load_duration.count());
+        LOGI("YOLOv11 model loading complete (took %lld ms).", load_duration.count());
         return JNI_TRUE;
     }
 
@@ -389,9 +352,7 @@ extern "C"
     JNIEXPORT jboolean JNICALL
     Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_hasVulkan(JNIEnv *env, jobject /* this */)
     {
-        // Accessing global state, technically should lock if init could run concurrently,
-        // but usually called after init is stable. Reading bools is often atomic enough.
-        // For strict safety: ncnn::MutexLockGuard guard(yoloNetLock);
+        // Reading bools is atomic enough, lock not strictly needed here
         return (ncnnInitialized && useGPU) ? JNI_TRUE : JNI_FALSE;
     }
 
@@ -399,25 +360,26 @@ extern "C"
     JNIEXPORT jfloatArray JNICALL
     Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_detectNative(
         JNIEnv *env, jobject /* this */,
-        jobject yBuffer, jobject uBuffer, jobject vBuffer,
+        jobject yBuffer, jobject uBuffer, jobject vBuffer, // Pass all three
         jint yStride, jint uvStride, jint uvPixelStride,
         jint imageWidth, jint imageHeight)
     {
         // --- Pre-checks ---
         if (!ncnnInitialized || !modelLoaded)
         {
+            LOGE("Detection failed: NCNN not initialized or model not loaded.");
             return nullptr;
         }
-        if (yBuffer == nullptr || uBuffer == nullptr || vBuffer == nullptr || imageWidth <= 0 || imageHeight <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0)
+        // Check required buffers (Y and V are essential for NV21 conversion)
+        if (yBuffer == nullptr || vBuffer == nullptr || imageWidth <= 0 || imageHeight <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0)
         {
-            LOGE("Detection failed: Invalid YUV input data provided.");
+            LOGE("Detection failed: Invalid YUV input data provided (Y/V buffer null or invalid dims/strides/pixelStride).");
             return nullptr;
         }
-        // Check if the pixel stride is supported (1 for planar, 2 for semi-planar NV21)
-        if (uvPixelStride != 1 && uvPixelStride != 2)
+        // Warn if pixel stride isn't 2, as nv21_to_rgb expects it.
+        if (uvPixelStride != 2)
         {
-            LOGE("Detection failed: Unsupported uvPixelStride %d. Only 1 (planar) or 2 (NV21 semi-planar) is supported for manual conversion.", uvPixelStride);
-            return nullptr;
+            LOGW("Received uvPixelStride = %d. nv21_to_rgb expects 2. Conversion might be incorrect.", uvPixelStride);
         }
 
         // --- Overall Timing Start ---
@@ -425,49 +387,32 @@ extern "C"
 
         // 1. Get direct buffer access to YUV planes
         unsigned char *y_pixel_data = (unsigned char *)env->GetDirectBufferAddress(yBuffer);
-        unsigned char *u_pixel_data = (unsigned char *)env->GetDirectBufferAddress(uBuffer); // Needed for planar
-        unsigned char *v_pixel_data = (unsigned char *)env->GetDirectBufferAddress(vBuffer); // Needed for planar (or start of VU for NV21)
+        unsigned char *vu_pixel_data = (unsigned char *)env->GetDirectBufferAddress(vBuffer); // For NV21, V buffer points to start of VU plane
 
-        // Sanity check pointers
-        if (y_pixel_data == nullptr || u_pixel_data == nullptr || v_pixel_data == nullptr)
+        if (y_pixel_data == nullptr || vu_pixel_data == nullptr)
         {
-            // Check all pointers now as planar needs U separately
-            LOGE("Failed to get direct buffer address for Y, U, or V planes. Ensure buffers are direct.");
+            LOGE("Failed to get direct buffer address for Y or VU (V) planes.");
             return nullptr;
         }
 
         // --- Preprocessing Timing Start ---
         auto preprocess_start_time = std::chrono::high_resolution_clock::now();
 
-        // 2. Preprocessing: Manually convert YUV to RGB based on pixel stride, then create ncnn::Mat
-        ncnn::Mat input_img;
-        std::vector<unsigned char> rgb_buffer(imageWidth * imageHeight * 3); // Allocate buffer for RGB data
+        // 2. Preprocessing: Manually convert YUV (NV21) to RGB, then create ncnn::Mat
+        // Allocate buffer for RGB data
+        std::vector<unsigned char> rgb_buffer(imageWidth * imageHeight * 3);
 
-        // Perform manual conversion based on uvPixelStride
-        if (uvPixelStride == 2)
-        {
-            // Use NV21 conversion (semi-planar)
-            LOGD("Using NV21 (uvPixelStride=2) conversion.");
-            // Pass V pointer as the start of the VU plane
-            nv21_to_rgb(y_pixel_data, v_pixel_data, rgb_buffer.data(),
-                        imageWidth, imageHeight, yStride, uvStride, uvPixelStride);
-        }
-        else
-        { // uvPixelStride == 1
-            // Use Planar conversion
-            LOGD("Using Planar YUV (uvPixelStride=1) conversion.");
-            planar_yuv420_to_rgb(y_pixel_data, u_pixel_data, v_pixel_data, rgb_buffer.data(),
-                                 imageWidth, imageHeight, yStride, uvStride);
-        }
+        // Perform manual conversion
+        nv21_to_rgb(y_pixel_data, vu_pixel_data, rgb_buffer.data(),
+                    imageWidth, imageHeight, yStride, uvStride, uvPixelStride);
 
         // Create ncnn::Mat from the converted RGB buffer
-        // Use from_pixels_resize to handle potential resizing and letterboxing to model input size
-        input_img = ncnn::Mat::from_pixels_resize(
+        // Use from_pixels_resize to handle potential resizing and letterboxing
+        ncnn::Mat input_img = ncnn::Mat::from_pixels_resize(
             rgb_buffer.data(), ncnn::Mat::PIXEL_RGB,  // Input is now RGB
             imageWidth, imageHeight,                  // Original dimensions
             YOLOV11_INPUT_WIDTH, YOLOV11_INPUT_HEIGHT // Target model dimensions
         );
-
         // rgb_buffer goes out of scope here and is automatically deallocated
 
         if (input_img.empty())
@@ -487,10 +432,8 @@ extern "C"
 
         // 3. NCNN Inference
         ncnn::Mat out;
-        // --- Set input name based on .param file ---
-        const char *input_name = "in0"; // Corrected based on .param file and NCNN log
-        // --- Verify output name based on .param file ---
-        const char *output_name = "out0"; // Check last layer in .param file (seems correct)
+        const char *input_name = "in0";   // Verify this matches your .param file
+        const char *output_name = "out0"; // Verify this matches your .param file
         std::chrono::microseconds inference_duration(0);
 
         { // Scope for extractor and mutex lock
@@ -504,111 +447,143 @@ extern "C"
 
             auto inference_start_time = std::chrono::high_resolution_clock::now();
 
-            // Use the corrected input_name here
             int input_ret = ex.input(input_name, input_img);
             if (input_ret != 0)
             {
-                // Log the name being used for easier debugging
-                LOGE("Failed to set input tensor with name '%s'. Error: %d. Check .param file.", input_name, input_ret);
+                LOGE("Failed to set input tensor '%s'. Error: %d.", input_name, input_ret);
                 return nullptr;
             }
 
-            // Use the potentially updated output_name here
             int extract_ret = ex.extract(output_name, out);
             if (extract_ret != 0)
             {
-                // Log the name being used for easier debugging
-                LOGE("Failed to extract output tensor with name '%s'. Error: %d. Check .param file.", output_name, extract_ret);
+                LOGE("Failed to extract output tensor '%s'. Error: %d.", output_name, extract_ret);
                 return nullptr;
             }
 
             auto inference_end_time = std::chrono::high_resolution_clock::now();
             inference_duration = std::chrono::duration_cast<std::chrono::microseconds>(inference_end_time - inference_start_time);
-        }
+        } // Mutex released, extractor destroyed
 
         // --- Postprocessing Timing Start ---
         auto postprocess_start_time = std::chrono::high_resolution_clock::now();
 
         std::vector<Object> proposals;
-        float scale = std::min((float)YOLOV11_INPUT_WIDTH / (float)imageWidth, (float)YOLOV11_INPUT_HEIGHT / (float)imageHeight);
-        float scaled_img_w = imageWidth * scale;
-        float scaled_img_h = imageHeight * scale;
-        float pad_left = (YOLOV11_INPUT_WIDTH - scaled_img_w) / 2.0f;
-        float pad_top = (YOLOV11_INPUT_HEIGHT - scaled_img_h) / 2.0f;
 
-        int num_detections = 0;
-        int num_features = 0;
-        const float *output_data = nullptr;
-        if (out.dims == 2)
+        // --- Adjust Dimension Check ---
+        // Allow Dims=2 (common format [num_proposals, num_features])
+        // Also check C dimension if Dims=3 (less common now)
+        if (out.dims != 2 && (out.dims != 3 || out.c != 1))
         {
-            num_features = out.h;
-            num_detections = out.w;
-            output_data = (const float *)out.data;
-        }
-        else if (out.dims == 3 && out.c == 1)
-        {
-            num_features = out.h;
-            num_detections = out.w;
-            output_data = out.channel(0).row(0);
-        }
-        else
-        {
-            LOGE("Unsupported output tensor shape. Dims=%d, W=%d, H=%d, C=%d.", out.dims, out.w, out.h, out.c);
+            LOGE("Unexpected output tensor shape. Dims=%d, W=%d, H=%d, C=%d. Expected Dims=2 or Dims=3 with C=1.", out.dims, out.w, out.h, out.c);
             return nullptr;
         }
-        int expected_features = 4 + NUM_CLASSES;
+
+        int num_proposals;
+        int num_features;
+
+        if (out.dims == 2) {
+            num_proposals = out.w;
+            num_features = out.h;
+            LOGD("Output tensor dims=2. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
+        } else { // out.dims == 3 && out.c == 1
+            num_proposals = out.w;
+            num_features = out.h;
+             LOGD("Output tensor dims=3, C=1. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
+        }
+        // --- End Dimension Check Adjustment ---
+
+
+        // *** UPDATED EXPECTED FEATURES CALCULATION ***
+        int expected_features = 4 + NUM_CLASSES; // cx, cy, w, h, class_scores...
+
+        LOGD("Checking features: Actual num_features = %d, Expected features = %d (4+%d)", num_features, expected_features, NUM_CLASSES);
+
         if (num_features != expected_features)
         {
-            LOGE("Output tensor feature count mismatch! Expected: %d, Got: %d.", expected_features, num_features);
-            return nullptr;
+            LOGE("Output feature count mismatch! Expected: %d (4 bbox + %d classes), Got: %d.", expected_features, NUM_CLASSES, num_features);
+            return nullptr; // Return null on mismatch
         }
-        if (num_detections <= 0 || output_data == nullptr)
+
+        if (num_proposals <= 0)
         {
+            LOGW("No proposals generated by the model (num_proposals = %d).", num_proposals);
+            // Return an array indicating zero detections
             jfloatArray emptyResult = env->NewFloatArray(1);
             if (emptyResult)
             {
                 float zero = 0.0f;
                 env->SetFloatArrayRegion(emptyResult, 0, 1, &zero);
+            } else {
+                 LOGE("Failed to allocate empty result array.");
             }
-            return emptyResult;
+            return emptyResult; // Return empty array instead of null
         }
 
+        float scale_x = (float)YOLOV11_INPUT_WIDTH / (float)imageWidth;
+        float scale_y = (float)YOLOV11_INPUT_HEIGHT / (float)imageHeight;
+        float scale = std::min(scale_x, scale_y);
+
+        float pad_left = (YOLOV11_INPUT_WIDTH - imageWidth * scale) / 2.0f;
+        float pad_top = (YOLOV11_INPUT_HEIGHT - imageHeight * scale) / 2.0f;
+
         std::vector<Object> raw_objects;
-        raw_objects.reserve(num_detections / 2);
-        for (int i = 0; i < num_detections; ++i)
+        raw_objects.reserve(num_proposals / 10);
+
+        const float *data = (const float *)out.data;
+
+        // *** UPDATED POST-PROCESSING LOOP ***
+        for (int i = 0; i < num_proposals; ++i)
         {
+            // Data layout assumed: [cx, cy, w, h, class0_logit, class1_logit, ...]
+            const float *proposal_data = data + i * num_features;
+
+            // Find the class with the highest score for this proposal
             int best_class_idx = -1;
-            float max_class_prob = -1.0f;
-            const float *class_scores_ptr = output_data + 4 * num_detections;
+            float max_class_score_prob = -1.0f; // Store max probability
+
+            // Class scores start at index 4 in this format
+            const float *class_scores_ptr = proposal_data + 4;
+
             for (int c = 0; c < NUM_CLASSES; ++c)
             {
-                float class_prob = class_scores_ptr[c * num_detections + i];
-                if (class_prob > max_class_prob)
+                // Apply sigmoid to class score logit
+                float class_score_logit = class_scores_ptr[c];
+                float class_score_prob = sigmoid(class_score_logit);
+
+                if (class_score_prob > max_class_score_prob)
                 {
-                    max_class_prob = class_prob;
+                    max_class_score_prob = class_score_prob;
                     best_class_idx = c;
                 }
             }
-            if (max_class_prob >= CONFIDENCE_THRESHOLD)
+
+            // Check if the highest class score meets the confidence threshold
+            if (max_class_score_prob >= CONFIDENCE_THRESHOLD)
             {
-                float cx = output_data[0 * num_detections + i];
-                float cy = output_data[1 * num_detections + i];
-                float w = output_data[2 * num_detections + i];
-                float h = output_data[3 * num_detections + i];
-                float x1_net = cx - w / 2.0f;
-                float y1_net = cy - h / 2.0f;
+                // Extract bounding box coordinates (center x, center y, width, height)
+                float cx_net = proposal_data[0];
+                float cy_net = proposal_data[1];
+                float w_net = proposal_data[2];
+                float h_net = proposal_data[3];
+
+                // ... Coordinate conversion and clamping logic remains the same ...
+                float x1_net = cx_net - w_net / 2.0f;
+                float y1_net = cy_net - h_net / 2.0f;
+
                 float x1_orig = (x1_net - pad_left) / scale;
                 float y1_orig = (y1_net - pad_top) / scale;
-                float w_orig = w / scale;
-                float h_orig = h / scale;
-                float x2_orig = x1_orig + w_orig;
-                float y2_orig = y1_orig + h_orig;
+                float w_orig = w_net / scale;
+                float h_orig = h_net / scale;
+
                 x1_orig = std::max(0.0f, std::min((float)imageWidth - 1.0f, x1_orig));
                 y1_orig = std::max(0.0f, std::min((float)imageHeight - 1.0f, y1_orig));
-                x2_orig = std::max(x1_orig, std::min((float)imageWidth - 1.0f, x2_orig));
-                y2_orig = std::max(y1_orig, std::min((float)imageHeight - 1.0f, y2_orig));
+                float x2_orig = std::min((float)imageWidth - 1.0f, x1_orig + w_orig);
+                float y2_orig = std::min((float)imageHeight - 1.0f, y1_orig + h_orig);
+
                 w_orig = x2_orig - x1_orig;
                 h_orig = y2_orig - y1_orig;
+
                 if (w_orig > 0 && h_orig > 0)
                 {
                     Object obj;
@@ -617,16 +592,22 @@ extern "C"
                     obj.w = w_orig;
                     obj.h = h_orig;
                     obj.label = best_class_idx;
-                    obj.prob = max_class_prob;
+                    // Final probability is the max class score probability
+                    obj.prob = max_class_score_prob;
                     raw_objects.push_back(obj);
                 }
             }
         }
 
+        // Sort objects by confidence score (descending)
         std::sort(raw_objects.begin(), raw_objects.end(), [](const Object &a, const Object &b)
                   { return a.prob > b.prob; });
+
+        // Apply Non-Maximum Suppression (NMS)
         std::vector<int> picked_indices;
         nms_sorted_bboxes(raw_objects, picked_indices, NMS_THRESHOLD);
+
+        // Collect final proposals after NMS
         proposals.reserve(picked_indices.size());
         for (int index : picked_indices)
         {
@@ -653,8 +634,10 @@ extern "C"
             LOGE("Failed to allocate float array for JNI results (size %d).", result_elements);
             return nullptr;
         }
+
         std::vector<float> resultData(result_elements);
         resultData[0] = static_cast<float>(final_count);
+
         for (int i = 0; i < final_count; ++i)
         {
             const Object &obj = proposals[i];
@@ -666,11 +649,13 @@ extern "C"
             resultData[offset + 4] = static_cast<float>(obj.label);
             resultData[offset + 5] = obj.prob;
         }
+
         env->SetFloatArrayRegion(resultArray, 0, result_elements, resultData.data());
 
         // --- Overall Timing End & Logging ---
         auto total_end_time = std::chrono::high_resolution_clock::now();
         auto total_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(total_end_time - total_start_time);
+
         static int frame_counter = 0;
         static const int LOG_INTERVAL = 30;
         if (++frame_counter % LOG_INTERVAL == 0)
@@ -687,36 +672,40 @@ extern "C"
     Java_com_example_yolo_1kotlin_1ncnn_NcnnDetector_releaseNative(JNIEnv *env, jobject /* this */)
     {
         LOGI("Releasing NCNN resources...");
-        bool wasUsingGpu; // Store GPU usage state before resetting
+        bool wasUsingGpu;
         {
-            ncnn::MutexLockGuard guard(yoloNetLock); // Ensure thread safety during cleanup
-            wasUsingGpu = useGPU;                    // Capture state before modification
+            ncnn::MutexLockGuard guard(yoloNetLock);
+            wasUsingGpu = useGPU;
+
             if (modelLoaded)
             {
-                yoloNet.clear(); // Clear the network (releases model data and internal context)
+                yoloNet.clear();
                 LOGD("NCNN Net cleared.");
-                modelLoaded = false; // Update state under lock
+                modelLoaded = false;
             }
             else
             {
                 LOGD("NCNN Net was not loaded, skipping clear.");
             }
-            ncnnInitialized = false; // Mark as uninitialized under lock
+
+            ncnnInitialized = false;
             useGPU = false;
             gpuDeviceIndex = -1;
-        } // Mutex released
+        }
 
-        // Destroy the Vulkan instance *outside* the lock if it was created
-        if (wasUsingGpu)
+        if (wasUsingGpu && gpuInstanceCreated)
         {
-            // This should be called only once when the application is shutting down
-            // or when NCNN GPU usage is definitively finished.
             ncnn::destroy_gpu_instance();
+            gpuInstanceCreated = false;
             LOGI("Vulkan GPU instance destroyed.");
+        }
+        else if (wasUsingGpu && !gpuInstanceCreated)
+        {
+            LOGW("Attempting to destroy GPU instance, but it wasn't marked as created.");
         }
         else
         {
-            LOGI("No Vulkan GPU instance to destroy (was using CPU).");
+            LOGI("No Vulkan GPU instance to destroy (was using CPU or instance not created).");
         }
 
         LOGI("NCNN resources released and state reset.");
