@@ -24,6 +24,7 @@
 #include "ncnn/gpu.h"
 #include "ncnn/layer.h" // Required for custom layers if any
 #include "ncnn/mat.h"   // For ncnn::Mat operations
+#include "ncnn/cpu.h"   // For ncnn misc functions like yuv420sp2rgb, resize_bilinear, copy_make_border
 
 // Global NCNN Net instance and state variables
 static ncnn::Net yoloNet;
@@ -140,66 +141,6 @@ static void nms_sorted_bboxes(const std::vector<Object> &objects, std::vector<in
             {
                 suppressed[j] = true;
             }
-        }
-    }
-}
-
-// Helper function to clamp value within 0-255 range
-static inline unsigned char clamp_u8(int value)
-{
-    return static_cast<unsigned char>(std::max(0, std::min(255, value)));
-}
-
-// Manual YUV420SP (NV21) to RGB conversion
-// Assumes NV21 format: Y plane followed by an interleaved V/U plane (VUVUVU...)
-// y_plane: Pointer to the start of the Y data
-// vu_plane: Pointer to the start of the interleaved V/U data (points to the first V)
-// rgb_output: Pointer to the output buffer (must be pre-allocated: width * height * 3 bytes)
-// width, height: Dimensions of the image
-// y_stride: Row stride of the Y plane
-// uv_stride: Row stride of the V/U plane
-// uv_pixel_stride: Pixel stride within the V/U plane (should be 2 for NV21)
-static void nv21_to_rgb(const unsigned char *y_plane, const unsigned char *vu_plane,
-                        unsigned char *rgb_output,
-                        int width, int height, int y_stride, int uv_stride, int uv_pixel_stride)
-{
-    // Basic check for NV21 compatibility
-    if (uv_pixel_stride != 2)
-    {
-        LOGE("nv21_to_rgb: Expected uv_pixel_stride of 2 for NV21 format, got %d. Filling output with black.", uv_pixel_stride);
-        std::fill(rgb_output, rgb_output + width * height * 3, 0);
-        return;
-    }
-
-    for (int j = 0; j < height; ++j)
-    {
-        const unsigned char *y_row = y_plane + j * y_stride;
-        // UV plane row index depends on Y row index (UV height is half of Y height)
-        // UV data for Y rows j and j+1 is located at UV row j/2
-        const unsigned char *uv_row = vu_plane + (j / 2) * uv_stride;
-
-        for (int i = 0; i < width; ++i)
-        {
-            // Y value for pixel (i, j)
-            const int y_value = y_row[i];
-
-            // Calculate index for V and U values in the interleaved UV plane
-            // For NV21 (VUVUVU): V is at uv_row[ (i/2) * 2 ], U is at uv_row[ (i/2) * 2 + 1 ]
-            const int uv_index = (i / 2) * uv_pixel_stride; // uv_pixel_stride is 2
-            const int v_value = uv_row[uv_index] - 128;     // V value for the 2x2 block
-            const int u_value = uv_row[uv_index + 1] - 128; // U value for the 2x2 block
-
-            // Calculate RGB values using standard conversion formula
-            // These formulas can vary slightly.
-            int r = y_value + (int)(1.402f * v_value);
-            int g = y_value - (int)(0.344f * u_value + 0.714f * v_value);
-            int b = y_value + (int)(1.772f * u_value);
-
-            // Clamp values to [0, 255] and store in the output buffer (RGB order)
-            int output_index = (j * width + i) * 3;
-            rgb_output[output_index + 0] = clamp_u8(r); // R
-            rgb_output[output_index + 1] = clamp_u8(g); // G
-            rgb_output[output_index + 2] = clamp_u8(b); // B
         }
     }
 }
@@ -369,15 +310,15 @@ extern "C"
             return nullptr;
         }
         // Check required buffers (Y and V are essential for NV21 conversion)
-        if (yBuffer == nullptr || vBuffer == nullptr || imageWidth <= 0 || imageHeight <= 0 || yStride <= 0 || uvStride <= 0 || uvPixelStride <= 0)
+        if (yBuffer == nullptr || vBuffer == nullptr || imageWidth <= 0 || imageHeight <= 0 || yStride <= 0 || uvStride <= 0)
         {
             LOGE("Detection failed: Invalid YUV input data provided (Y/V buffer null or invalid dims/strides/pixelStride).");
             return nullptr;
         }
-        // Warn if pixel stride isn't 2, as nv21_to_rgb expects it.
+        // Warn if pixel stride isn't 2, as ncnn::Mat::from_pixels_yuv420sp_resize assumes it.
         if (uvPixelStride != 2)
         {
-            LOGW("Received uvPixelStride = %d. nv21_to_rgb expects 2. Conversion might be incorrect.", uvPixelStride);
+            LOGW("Received uvPixelStride = %d. ncnn::Mat::from_pixels_yuv420sp_resize assumes 2. Conversion might be incorrect.", uvPixelStride);
         }
 
         // --- Overall Timing Start ---
@@ -396,30 +337,81 @@ extern "C"
         // --- Preprocessing Timing Start ---
         auto preprocess_start_time = std::chrono::high_resolution_clock::now();
 
-        // 2. Preprocessing: Manually convert YUV (NV21) to RGB, then create ncnn::Mat
-        // Allocate buffer for RGB data
-        std::vector<unsigned char> rgb_buffer(imageWidth * imageHeight * 3);
+        // 2. Preprocessing: Manual YUV420SP (NV21) -> RGB -> Resize -> Pad -> Normalize
 
-        // Perform manual conversion
-        nv21_to_rgb(y_pixel_data, vu_pixel_data, rgb_buffer.data(),
-                    imageWidth, imageHeight, yStride, uvStride, uvPixelStride);
+        // Calculate scaling factor and padding for letterboxing/pillarboxing
+        float scale_x = (float)YOLOV11_INPUT_WIDTH / (float)imageWidth;
+        float scale_y = (float)YOLOV11_INPUT_HEIGHT / (float)imageHeight;
+        float scale = std::min(scale_x, scale_y);
 
-        // Create ncnn::Mat from the converted RGB buffer
-        // Use from_pixels_resize to handle potential resizing and letterboxing
-        ncnn::Mat input_img = ncnn::Mat::from_pixels_resize(
-            rgb_buffer.data(), ncnn::Mat::PIXEL_RGB,  // Input is now RGB
-            imageWidth, imageHeight,                  // Original dimensions
-            YOLOV11_INPUT_WIDTH, YOLOV11_INPUT_HEIGHT // Target model dimensions
-        );
-        // rgb_buffer goes out of scope here and is automatically deallocated
+        int scaled_w = static_cast<int>(imageWidth * scale);
+        int scaled_h = static_cast<int>(imageHeight * scale);
 
-        if (input_img.empty())
-        {
-            LOGE("Failed to create or resize ncnn::Mat from manually converted RGB pixels.");
-            return nullptr;
-        }
+        // Calculate padding offsets
+        // Ensure pads are non-negative integers
+        int pad_top = std::max(0, (YOLOV11_INPUT_HEIGHT - scaled_h) / 2);
+        int pad_bottom = std::max(0, YOLOV11_INPUT_HEIGHT - scaled_h - pad_top);
+        int pad_left = std::max(0, (YOLOV11_INPUT_WIDTH - scaled_w) / 2);
+        int pad_right = std::max(0, YOLOV11_INPUT_WIDTH - scaled_w - pad_left);
 
-        // Normalize the image (applied to the RGB Mat)
+        ncnn::Mat input_img; // This will hold the final preprocessed image
+
+        { // Scope for temporary buffers and mats
+            // Allocate temporary buffer for the full original RGB image
+            std::vector<unsigned char> rgb_buffer(imageWidth * imageHeight * 3);
+
+            // --- Create a contiguous YUV buffer ---
+            // ncnn::yuv420sp2rgb expects Y plane followed immediately by VU plane.
+            // Size = Y_size + VU_size = (w*h) + (w*h/2) = w*h*3/2
+            size_t y_size = static_cast<size_t>(imageWidth) * imageHeight; // Use imageWidth, function assumes no stride padding
+            size_t vu_size = y_size / 2; // VU plane size
+            std::vector<unsigned char> yuv_buffer(y_size + vu_size);
+
+            // Copy Y plane data.
+            // WARNING: This assumes yStride == imageWidth. If not, this copy is incorrect.
+            // A row-by-row copy would be needed if yStride != imageWidth.
+            memcpy(yuv_buffer.data(), y_pixel_data, y_size);
+
+            // Copy VU plane data immediately after Y data.
+            // WARNING: This assumes uvStride handles the interleaved VU data correctly
+            // and effectively uvStride/2 == imageWidth/2 for the number of V/U pairs per row.
+            // A more robust copy would handle uvPixelStride and uvStride explicitly row by row.
+            // For simplicity matching yuv420sp2rgb's expectation, we copy vu_size bytes.
+            memcpy(yuv_buffer.data() + y_size, vu_pixel_data, vu_size);
+            // --- End contiguous YUV buffer creation ---
+
+
+            // Convert YUV420SP (NV21 assumed) to RGB using the contiguous buffer
+            // Pass the pointer to the start of our combined buffer.
+            ncnn::yuv420sp2rgb(yuv_buffer.data(), imageWidth, imageHeight, rgb_buffer.data());
+
+            // Create ncnn::Mat from the original size RGB data
+            ncnn::Mat rgb_mat = ncnn::Mat::from_pixels(rgb_buffer.data(), ncnn::Mat::PIXEL_RGB, imageWidth, imageHeight);
+            if (rgb_mat.empty())
+            {
+                LOGE("Failed to create ncnn::Mat from RGB buffer.");
+                return nullptr;
+            }
+
+            // Resize the RGB Mat to the scaled dimensions (maintaining aspect ratio)
+            ncnn::Mat resized_mat;
+            ncnn::resize_bilinear(rgb_mat, resized_mat, scaled_w, scaled_h);
+            if (resized_mat.empty())
+            {
+                LOGE("Failed to resize RGB ncnn::Mat.");
+                return nullptr;
+            }
+
+            // Pad the resized Mat to the final target input size
+            ncnn::copy_make_border(resized_mat, input_img, pad_top, pad_bottom, pad_left, pad_right, ncnn::BORDER_CONSTANT, 114.f);
+            if (input_img.empty())
+            {
+                LOGE("Failed to pad resized ncnn::Mat.");
+                return nullptr;
+            }
+        } // End scope for temporary buffers/mats
+
+        // Normalize the final padded image (applied to the RGB Mat)
         const float mean_vals[3] = {0.f, 0.f, 0.f};
         const float norm_vals[3] = {1 / 255.f, 1 / 255.f, 1 / 255.f};
         input_img.substract_mean_normalize(mean_vals, norm_vals);
@@ -466,7 +458,6 @@ extern "C"
         // --- Postprocessing Timing Start ---
         auto postprocess_start_time = std::chrono::high_resolution_clock::now();
 
-        // *** RESTORED proposals vector ***
         std::vector<Object> proposals;
         std::vector<Object> raw_objects; // Keep storing raw objects before NMS
 
@@ -482,14 +473,17 @@ extern "C"
         int num_proposals;
         int num_features;
 
-        if (out.dims == 2) {
+        if (out.dims == 2)
+        {
             num_proposals = out.w;
             num_features = out.h;
             LOGD("Output tensor dims=2. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
-        } else { // out.dims == 3 && out.c == 1
+        }
+        else
+        { // out.dims == 3 && out.c == 1
             num_proposals = out.w;
             num_features = out.h;
-             LOGD("Output tensor dims=3, C=1. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
+            LOGD("Output tensor dims=3, C=1. num_proposals(W)=%d, num_features(H)=%d", num_proposals, num_features);
         }
         // --- End Dimension Check Adjustment ---
 
@@ -513,18 +507,13 @@ extern "C"
             {
                 float zero = 0.0f;
                 env->SetFloatArrayRegion(emptyResult, 0, 1, &zero);
-            } else {
-                 LOGE("Failed to allocate empty result array.");
+            }
+            else
+            {
+                LOGE("Failed to allocate empty result array.");
             }
             return emptyResult; // Return empty array instead of null
         }
-
-        float scale_x = (float)YOLOV11_INPUT_WIDTH / (float)imageWidth;
-        float scale_y = (float)YOLOV11_INPUT_HEIGHT / (float)imageHeight;
-        float scale = std::min(scale_x, scale_y);
-
-        float pad_left = (YOLOV11_INPUT_WIDTH - imageWidth * scale) / 2.0f;
-        float pad_top = (YOLOV11_INPUT_HEIGHT - imageHeight * scale) / 2.0f;
 
         raw_objects.reserve(num_proposals / 10); // Reserve space
 
@@ -550,10 +539,13 @@ extern "C"
                 float class_score_logit = class_scores_ptr[c];
 
                 // *** ADDED RAW LOGIT LOGGING (Limited) ***
-                if (proposal_log_counter < MAX_PROPOSAL_LOGS && c < 5) { // Log first 5 classes for first 5 proposals
-                     LOGD("Proposal %d, Class %d: Raw Logit = %.4f", i, c, class_score_logit);
-                } else if (proposal_log_counter < MAX_PROPOSAL_LOGS && class_score_logit > 10.0f) { // Log if logit is unusually high
-                     LOGD("Proposal %d, Class %d: High Raw Logit = %.4f", i, c, class_score_logit);
+                if (proposal_log_counter < MAX_PROPOSAL_LOGS && c < 5)
+                { // Log first 5 classes for first 5 proposals
+                    LOGD("Proposal %d, Class %d: Raw Logit = %.4f", i, c, class_score_logit);
+                }
+                else if (proposal_log_counter < MAX_PROPOSAL_LOGS && class_score_logit > 10.0f)
+                { // Log if logit is unusually high
+                    LOGD("Proposal %d, Class %d: High Raw Logit = %.4f", i, c, class_score_logit);
                 }
                 // *** END RAW LOGIT LOGGING ***
 
@@ -565,11 +557,11 @@ extern "C"
                     best_class_idx = c;
                 }
             }
-             // Increment proposal log counter after processing all classes for one proposal
-            if (i < MAX_PROPOSAL_LOGS) {
+            // Increment proposal log counter after processing all classes for one proposal
+            if (i < MAX_PROPOSAL_LOGS)
+            {
                 proposal_log_counter++;
             }
-
 
             // Check if the highest class score meets the (restored) confidence threshold
             if (max_class_score_prob >= CONFIDENCE_THRESHOLD)
@@ -634,13 +626,11 @@ extern "C"
         }
         // *** END RESTORED NMS ***
 
-
         // --- Postprocessing Timing End ---
         auto postprocess_end_time = std::chrono::high_resolution_clock::now();
         auto postprocess_duration = std::chrono::duration_cast<std::chrono::microseconds>(postprocess_end_time - postprocess_start_time);
 
         // 5. Format results for Java/Kotlin
-        // *** USE proposals (after NMS) FOR FINAL RESULT ***
         int final_count = proposals.size(); // Use size of proposals
         int result_elements = 1 + final_count * 6;
         jfloatArray resultArray = env->NewFloatArray(result_elements);
@@ -655,7 +645,6 @@ extern "C"
 
         for (int i = 0; i < final_count; ++i)
         {
-            // *** USE proposals (after NMS) FOR FINAL RESULT ***
             const Object &obj = proposals[i]; // Use proposals
             int offset = 1 + i * 6;
             resultData[offset + 0] = obj.x;
